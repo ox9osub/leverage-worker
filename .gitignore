@@ -165,3 +165,5 @@ cython_debug/
 *.lock
 
 *_logs/
+leverage_worker/config/credentials/*.yaml
+leverage_worker/config/trading_config.yaml
