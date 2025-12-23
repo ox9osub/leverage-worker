@@ -2,7 +2,15 @@
   "permissions": {
     "allow": [
       "Bash(ls:*)",
-      "Bash(cat:*)"
+      "Bash(cat:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(python:*)",
+      "Bash(uv run:*)",
+      "Bash(where python:*)",
+      "Bash(dir:*)",
+      "Bash(py:*)",
+      "Bash(python -c:*)",
+      "Bash(python -m py_compile:*)"
     ],
     "deny": [],
     "ask": []

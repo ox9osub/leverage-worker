@@ -77,8 +77,8 @@ def main() -> int:
         logger.info(f"Managed stocks: {len(settings.stocks)}")
 
         for stock_code, stock_config in settings.stocks.items():
-            name = stock_config.get("name", stock_code)
-            strategies = stock_config.get("strategies", [])
+            name = stock_config.name
+            strategies = stock_config.strategies
             strategy_names = [s.get("name", "?") for s in strategies]
             logger.info(f"  - {name} ({stock_code}): {strategy_names or 'No strategy'}")
 

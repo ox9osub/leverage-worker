@@ -50,6 +50,8 @@ class StockConfig:
 class NotificationConfig:
     """알림 설정"""
     slack_webhook_url: Optional[str] = None
+    slack_token: Optional[str] = None  # Bot Token (xoxb-...)
+    slack_channel: Optional[str] = None  # Channel ID (C...)
     enable_trade_alerts: bool = True
     enable_daily_report: bool = True
 
@@ -57,7 +59,11 @@ class NotificationConfig:
 class Settings:
     """전역 설정 관리 클래스"""
 
-    def __init__(self, mode: TradingMode = TradingMode.PAPER):
+    def __init__(
+        self,
+        mode: TradingMode = TradingMode.PAPER,
+        config_path: Optional[Path] = None,
+    ):
         self.mode = mode
         self.schedule = ScheduleConfig()
         self.session = SessionConfig()
@@ -65,6 +71,13 @@ class Settings:
         self._credentials: Dict[str, Any] = {}
         self._stocks: Dict[str, StockConfig] = {}
         self._config_path: Optional[Path] = None
+
+        # 설정 자동 로드
+        if config_path is None:
+            # 기본 경로: leverage_worker/config/
+            config_path = Path(__file__).parent
+
+        self.load(config_path)
 
     def load(self, config_path: Path) -> None:
         """전체 설정 로드"""
@@ -103,10 +116,19 @@ class Settings:
             idle_check_interval_seconds=schedule_cfg.get("idle_check_interval_seconds", 60),
         )
 
+        # 세션 설정
+        session_cfg = config.get("session", {})
+        self.session = SessionConfig(
+            token_refresh_hours_before=session_cfg.get("token_refresh_hours_before", 8),
+            token_validity_hours=session_cfg.get("token_validity_hours", 24),
+        )
+
         # 알림 설정
         notification_cfg = config.get("notification", {})
         self.notification = NotificationConfig(
             slack_webhook_url=notification_cfg.get("slack_webhook_url"),
+            slack_token=notification_cfg.get("slack_token"),
+            slack_channel=notification_cfg.get("slack_channel"),
             enable_trade_alerts=notification_cfg.get("enable_trade_alerts", True),
             enable_daily_report=notification_cfg.get("enable_daily_report", True),
         )

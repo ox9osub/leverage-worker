@@ -1,7 +1,9 @@
 """
 Slack 알림 모듈
 
-Slack 웹훅을 통한 알림 전송
+Slack 알림 전송 (두 가지 방식 지원)
+- Webhook URL 방식
+- Bot Token + Channel 방식
 - 매매 알림
 - 오류 알림
 - 일일 리포트
@@ -22,22 +24,35 @@ class SlackNotifier:
     """
     Slack 알림 클래스
 
-    - 웹훅을 통한 메시지 전송
+    - 웹훅 또는 Bot Token을 통한 메시지 전송
     - Block Kit 포맷 지원
     """
 
-    def __init__(self, webhook_url: Optional[str] = None):
+    def __init__(
+        self,
+        webhook_url: Optional[str] = None,
+        token: Optional[str] = None,
+        channel: Optional[str] = None,
+    ):
         """
         Args:
-            webhook_url: Slack Webhook URL (None이면 비활성화)
+            webhook_url: Slack Webhook URL (None이면 token/channel 사용)
+            token: Slack Bot Token (xoxb-...)
+            channel: Slack Channel ID (C...)
         """
         self._webhook_url = webhook_url
-        self._enabled = webhook_url is not None and len(webhook_url) > 0
+        self._token = token
+        self._channel = channel
+
+        # 우선순위: token+channel > webhook_url
+        self._use_token = token is not None and channel is not None
+        self._enabled = self._use_token or (webhook_url is not None and len(webhook_url) > 0)
 
         if self._enabled:
-            logger.info("SlackNotifier enabled")
+            method = "Bot Token" if self._use_token else "Webhook"
+            logger.info(f"SlackNotifier enabled ({method})")
         else:
-            logger.info("SlackNotifier disabled (no webhook URL)")
+            logger.info("SlackNotifier disabled (no credentials)")
 
     @property
     def is_enabled(self) -> bool:
@@ -58,6 +73,13 @@ class SlackNotifier:
             logger.debug(f"Slack disabled, message not sent: {text[:50]}...")
             return False
 
+        if self._use_token:
+            return self._send_via_token(text, blocks)
+        else:
+            return self._send_via_webhook(text, blocks)
+
+    def _send_via_webhook(self, text: str, blocks: Optional[List[Dict]] = None) -> bool:
+        """Webhook 방식으로 메시지 전송"""
         payload = {"text": text}
         if blocks:
             payload["blocks"] = blocks
@@ -71,16 +93,48 @@ class SlackNotifier:
             )
 
             if response.status_code == 200:
-                logger.debug("Slack message sent successfully")
+                logger.debug("Slack message sent successfully (webhook)")
                 return True
             else:
                 logger.error(
-                    f"Slack API error: {response.status_code} - {response.text}"
+                    f"Slack webhook error: {response.status_code} - {response.text}"
                 )
                 return False
 
         except Exception as e:
-            logger.error(f"Slack send error: {e}")
+            logger.error(f"Slack webhook send error: {e}")
+            return False
+
+    def _send_via_token(self, text: str, blocks: Optional[List[Dict]] = None) -> bool:
+        """Bot Token 방식으로 메시지 전송 (chat.postMessage API)"""
+        payload = {
+            "channel": self._channel,
+            "text": text,
+        }
+        if blocks:
+            payload["blocks"] = blocks
+
+        try:
+            response = requests.post(
+                "https://slack.com/api/chat.postMessage",
+                json=payload,
+                headers={
+                    "Authorization": f"Bearer {self._token}",
+                    "Content-Type": "application/json",
+                },
+                timeout=10,
+            )
+
+            result = response.json()
+            if result.get("ok"):
+                logger.debug("Slack message sent successfully (token)")
+                return True
+            else:
+                logger.error(f"Slack API error: {result.get('error', 'unknown')}")
+                return False
+
+        except Exception as e:
+            logger.error(f"Slack token send error: {e}")
             return False
 
     def notify_buy(

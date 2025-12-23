@@ -163,14 +163,16 @@ class TradingScheduler:
             return
 
         for stock_code, stock_config in self._stocks.items():
-            # 종목별 interval/offset
-            interval = stock_config.get(
-                "interval_seconds",
-                self._schedule.default_interval_seconds,
+            # 종목별 interval/offset (StockConfig 속성 사용)
+            interval = (
+                stock_config.interval_seconds
+                if stock_config.interval_seconds is not None
+                else self._schedule.default_interval_seconds
             )
-            offset = stock_config.get(
-                "offset_seconds",
-                self._schedule.default_offset_seconds,
+            offset = (
+                stock_config.offset_seconds
+                if stock_config.offset_seconds is not None
+                else self._schedule.default_offset_seconds
             )
 
             # 실행 시점인지 확인

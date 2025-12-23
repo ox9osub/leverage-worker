@@ -72,8 +72,11 @@ class TradingEngine:
         self._scheduler = TradingScheduler(settings)
 
         # 8. Slack Notifier
-        webhook_url = settings.notification.get("slack_webhook_url")
-        self._slack = SlackNotifier(webhook_url)
+        self._slack = SlackNotifier(
+            webhook_url=settings.notification.slack_webhook_url,
+            token=settings.notification.slack_token,
+            channel=settings.notification.slack_channel,
+        )
 
         # 9. Daily Report Generator
         self._report_generator = DailyReportGenerator(self._db, self._slack)
@@ -183,7 +186,7 @@ class TradingEngine:
     def _load_strategies(self) -> None:
         """전략 인스턴스 로드"""
         for stock_code, stock_config in self._settings.stocks.items():
-            strategies = stock_config.get("strategies", [])
+            strategies = stock_config.strategies
 
             for strategy_config in strategies:
                 name = strategy_config.get("name")
@@ -236,8 +239,11 @@ class TradingEngine:
                 return
 
             # 5. 전략별 시그널 생성
-            stock_config = self._settings.stocks.get(stock_code, {})
-            strategies = stock_config.get("strategies", [])
+            stock_config = self._settings.stocks.get(stock_code)
+            if not stock_config:
+                return
+
+            strategies = stock_config.strategies
 
             if not strategies:
                 # 전략 없음 → 가격만 저장
@@ -265,7 +271,7 @@ class TradingEngine:
                 # 전략 컨텍스트 생성
                 context = StrategyContext(
                     stock_code=stock_code,
-                    stock_name=stock_config.get("name", stock_code),
+                    stock_name=stock_config.name,
                     current_price=price_info.current_price,
                     current_time=now,
                     price_history=price_history,
