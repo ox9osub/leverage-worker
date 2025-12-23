@@ -1,11 +1,15 @@
 """
-가격 저장소 모듈
+가격 저장소 모듈 (DEPRECATED)
 
-분봉 OHLCV 데이터 저장 및 조회
-- Upsert (있으면 UPDATE, 없으면 INSERT)
-- 과거 N개 분봉 조회 (전략용)
+이 모듈은 하위 호환성을 위해 유지됩니다.
+새로운 코드에서는 minute_candle_repository를 사용하세요.
+
+>>> from leverage_worker.data.minute_candle_repository import MinuteCandleRepository
+>>> # 또는 호환성 별칭 사용
+>>> from leverage_worker.data.minute_candle_repository import PriceRepository
 """
 
+import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional
@@ -15,6 +19,14 @@ from leverage_worker.utils.logger import get_logger
 from leverage_worker.utils.time_utils import get_current_minute_key
 
 logger = get_logger(__name__)
+
+# Deprecation 경고
+warnings.warn(
+    "price_repository 모듈은 deprecated입니다. "
+    "minute_candle_repository.MinuteCandleRepository를 사용하세요.",
+    DeprecationWarning,
+    stacklevel=2,
+)
 
 
 @dataclass

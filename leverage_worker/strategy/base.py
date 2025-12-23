@@ -13,7 +13,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from leverage_worker.data.price_repository import OHLCV
+from leverage_worker.data.minute_candle_repository import MinuteCandle as OHLCV
 from leverage_worker.trading.broker import Position
 
 

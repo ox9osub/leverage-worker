@@ -258,7 +258,7 @@ class TestDatabase:
         import tempfile
         from pathlib import Path
         from leverage_worker.data.database import Database
-        from leverage_worker.data.price_repository import PriceRepository
+        from leverage_worker.data.minute_candle_repository import MinuteCandleRepository as PriceRepository
 
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "test.db"

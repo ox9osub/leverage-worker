@@ -2,9 +2,12 @@
 데이터베이스 모듈
 
 SQLite 데이터베이스 연결 및 테이블 관리
-- 가격 히스토리 (분봉 OHLCV)
-- 주문 기록
-- 일일 거래 요약
+- 종목 마스터 (stocks)
+- 일봉 데이터 (daily_candles)
+- 분봉 데이터 (minute_candles)
+- 주문 기록 (orders)
+- 포지션 (positions)
+- 일일 거래 요약 (daily_summary)
 """
 
 import sqlite3
@@ -97,7 +100,112 @@ class Database:
     def _init_tables(self) -> None:
         """테이블 생성"""
         with self.get_cursor() as cursor:
-            # 분봉 가격 테이블
+            # ========================================
+            # 종목 마스터 테이블
+            # ========================================
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS stocks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stock_code TEXT NOT NULL UNIQUE,
+                    stock_name TEXT NOT NULL,
+                    market TEXT NOT NULL,
+                    sector TEXT,
+                    is_active INTEGER DEFAULT 1,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_stocks_market
+                ON stocks(market)
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_stocks_active
+                ON stocks(is_active)
+            """)
+
+            # ========================================
+            # 일봉 데이터 테이블
+            # ========================================
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS daily_candles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stock_code TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    open_price REAL NOT NULL,
+                    high_price REAL NOT NULL,
+                    low_price REAL NOT NULL,
+                    close_price REAL NOT NULL,
+                    volume INTEGER NOT NULL,
+                    trade_amount INTEGER,
+                    adj_close_price REAL,
+                    change_rate REAL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(stock_code, trade_date)
+                )
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_daily_stock
+                ON daily_candles(stock_code)
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_daily_date
+                ON daily_candles(trade_date)
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_daily_stock_date
+                ON daily_candles(stock_code, trade_date)
+            """)
+
+            # ========================================
+            # 분봉 데이터 테이블
+            # ========================================
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS minute_candles (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stock_code TEXT NOT NULL,
+                    candle_datetime TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    open_price REAL NOT NULL,
+                    high_price REAL NOT NULL,
+                    low_price REAL NOT NULL,
+                    close_price REAL NOT NULL,
+                    volume INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(stock_code, candle_datetime)
+                )
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_minute_stock
+                ON minute_candles(stock_code)
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_minute_date
+                ON minute_candles(trade_date)
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_minute_stock_date
+                ON minute_candles(stock_code, trade_date)
+            """)
+
+            cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_minute_stock_datetime
+                ON minute_candles(stock_code, candle_datetime)
+            """)
+
+            # ========================================
+            # [DEPRECATED] 기존 분봉 가격 테이블 (마이그레이션 후 제거 예정)
+            # ========================================
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS price_history (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -238,10 +346,21 @@ class Database:
     def get_table_stats(self) -> dict:
         """테이블별 통계 조회"""
         stats = {}
-        tables = ["price_history", "orders", "positions", "daily_summary"]
+        tables = [
+            "stocks",
+            "daily_candles",
+            "minute_candles",
+            "price_history",  # deprecated
+            "orders",
+            "positions",
+            "daily_summary",
+        ]
 
         for table in tables:
-            row = self.fetch_one(f"SELECT COUNT(*) as cnt FROM {table}")
-            stats[table] = row["cnt"] if row else 0
+            try:
+                row = self.fetch_one(f"SELECT COUNT(*) as cnt FROM {table}")
+                stats[table] = row["cnt"] if row else 0
+            except Exception:
+                stats[table] = 0
 
         return stats

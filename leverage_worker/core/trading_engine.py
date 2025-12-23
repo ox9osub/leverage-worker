@@ -16,7 +16,7 @@ from leverage_worker.config.settings import Settings, TradingMode
 from leverage_worker.core.scheduler import TradingScheduler
 from leverage_worker.core.session_manager import SessionManager
 from leverage_worker.data.database import Database
-from leverage_worker.data.price_repository import PriceRepository
+from leverage_worker.data.minute_candle_repository import MinuteCandleRepository
 from leverage_worker.notification.daily_report import DailyReportGenerator
 from leverage_worker.notification.slack_notifier import SlackNotifier
 from leverage_worker.strategy import (
@@ -53,8 +53,8 @@ class TradingEngine:
         # 1. Database
         self._db = Database()
 
-        # 2. Price Repository
-        self._price_repo = PriceRepository(self._db)
+        # 2. Minute Candle Repository (분봉 데이터)
+        self._price_repo = MinuteCandleRepository(self._db)
 
         # 3. Session Manager (인증)
         self._session = SessionManager(settings)
