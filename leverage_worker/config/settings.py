@@ -184,6 +184,18 @@ class Settings:
         return self._credentials.get("hts_id", "")
 
     @property
+    def market_data_db_path(self) -> Path:
+        """시세 DB 경로 (모의/실전 공유)"""
+        return Path(__file__).parent.parent / "data" / "market_data.db"
+
+    @property
+    def trading_db_path(self) -> Path:
+        """매매 DB 경로 (모의/실전 분리)"""
+        if self.mode == TradingMode.PAPER:
+            return Path(__file__).parent.parent / "data" / "trading_paper.db"
+        return Path(__file__).parent.parent / "data" / "trading_live.db"
+
+    @property
     def stocks(self) -> Dict[str, StockConfig]:
         """종목 설정 딕셔너리"""
         return self._stocks

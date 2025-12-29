@@ -235,21 +235,40 @@ class TestStrategy:
 class TestDatabase:
     """데이터베이스 테스트"""
 
-    def test_database_init(self):
-        """DB 초기화 테스트"""
+    def test_market_data_db_init(self):
+        """시세 DB 초기화 테스트"""
         import tempfile
         from pathlib import Path
-        from leverage_worker.data.database import Database
+        from leverage_worker.data.database import MarketDataDB
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            db_path = Path(temp_dir) / "test.db"
-            db = Database(db_path)
+            db_path = Path(temp_dir) / "market_data.db"
+            db = MarketDataDB(db_path)
 
-            # 테이블 생성 확인
+            # 시세 테이블 생성 확인
             stats = db.get_table_stats()
+            assert "stocks" in stats
+            assert "daily_candles" in stats
+            assert "minute_candles" in stats
             assert "price_history" in stats
+
+            db.close()
+
+    def test_trading_db_init(self):
+        """매매 DB 초기화 테스트"""
+        import tempfile
+        from pathlib import Path
+        from leverage_worker.data.database import TradingDB
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "trading.db"
+            db = TradingDB(db_path)
+
+            # 매매 테이블 생성 확인
+            stats = db.get_table_stats()
             assert "orders" in stats
             assert "positions" in stats
+            assert "daily_summary" in stats
 
             db.close()
 
@@ -257,12 +276,12 @@ class TestDatabase:
         """가격 저장소 테스트"""
         import tempfile
         from pathlib import Path
-        from leverage_worker.data.database import Database
+        from leverage_worker.data.database import MarketDataDB
         from leverage_worker.data.minute_candle_repository import MinuteCandleRepository as PriceRepository
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            db_path = Path(temp_dir) / "test.db"
-            db = Database(db_path)
+            db_path = Path(temp_dir) / "market_data.db"
+            db = MarketDataDB(db_path)
             repo = PriceRepository(db)
 
             # 가격 upsert

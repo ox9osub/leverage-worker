@@ -2,9 +2,14 @@
 데이터베이스 모듈
 
 SQLite 데이터베이스 연결 및 테이블 관리
+
+시세 DB (market_data.db) - 공유:
 - 종목 마스터 (stocks)
 - 일봉 데이터 (daily_candles)
 - 분봉 데이터 (minute_candles)
+- 가격 히스토리 (price_history) [deprecated]
+
+매매 DB (trading_*.db) - 모드별 분리:
 - 주문 기록 (orders)
 - 포지션 (positions)
 - 일일 거래 요약 (daily_summary)
@@ -24,23 +29,18 @@ logger = get_logger(__name__)
 
 class Database:
     """
-    SQLite 데이터베이스 관리 클래스
+    SQLite 데이터베이스 관리 베이스 클래스
 
     - 연결 풀링 (스레드별 연결)
-    - 테이블 자동 생성
     - 트랜잭션 관리
     """
 
-    def __init__(self, db_path: Optional[Path] = None):
+    def __init__(self, db_path: Path):
         """
         Args:
-            db_path: DB 파일 경로. None이면 기본 경로 사용
+            db_path: DB 파일 경로
         """
-        if db_path is None:
-            # 기본 경로: leverage_worker/data/trading.db
-            self._db_path = Path(__file__).parent / "trading.db"
-        else:
-            self._db_path = db_path
+        self._db_path = db_path
 
         # 스레드별 연결 저장
         self._local = threading.local()
@@ -49,7 +49,7 @@ class Database:
         # DB 디렉토리 생성
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # 테이블 초기화
+        # 테이블 초기화 (서브클래스에서 구현)
         self._init_tables()
 
         logger.info(f"Database initialized: {self._db_path}")
@@ -98,7 +98,79 @@ class Database:
             cursor.close()
 
     def _init_tables(self) -> None:
-        """테이블 생성"""
+        """테이블 생성 (서브클래스에서 구현)"""
+        pass
+
+    def execute(self, query: str, params: tuple = ()) -> sqlite3.Cursor:
+        """단일 쿼리 실행"""
+        with self.get_cursor() as cursor:
+            cursor.execute(query, params)
+            return cursor
+
+    def execute_many(self, query: str, params_list: list) -> None:
+        """다중 쿼리 실행"""
+        with self.get_cursor() as cursor:
+            cursor.executemany(query, params_list)
+
+    def fetch_one(self, query: str, params: tuple = ()) -> Optional[sqlite3.Row]:
+        """단일 행 조회"""
+        with self.get_cursor() as cursor:
+            cursor.execute(query, params)
+            return cursor.fetchone()
+
+    def fetch_all(self, query: str, params: tuple = ()) -> list:
+        """전체 행 조회"""
+        with self.get_cursor() as cursor:
+            cursor.execute(query, params)
+            return cursor.fetchall()
+
+    def close(self) -> None:
+        """현재 스레드의 연결 종료"""
+        if hasattr(self._local, "connection") and self._local.connection:
+            self._local.connection.close()
+            self._local.connection = None
+            logger.debug("Database connection closed")
+
+    def close_all(self) -> None:
+        """모든 연결 종료 (메인 스레드에서 호출)"""
+        self.close()
+        logger.info("All database connections closed")
+
+    def vacuum(self) -> None:
+        """DB 최적화 (압축)"""
+        with self.get_cursor() as cursor:
+            cursor.execute("VACUUM")
+        logger.info("Database vacuumed")
+
+    def get_table_stats(self) -> dict:
+        """테이블별 통계 조회 (서브클래스에서 오버라이드)"""
+        return {}
+
+
+class MarketDataDB(Database):
+    """
+    시세 데이터 전용 DB (모의투자/실투자 공유)
+
+    테이블:
+    - stocks: 종목 마스터
+    - daily_candles: 일봉 데이터
+    - minute_candles: 분봉 데이터
+    - price_history: [deprecated] 기존 분봉 테이블
+    """
+
+    DEFAULT_PATH = Path(__file__).parent / "market_data.db"
+
+    def __init__(self, db_path: Optional[Path] = None):
+        """
+        Args:
+            db_path: DB 파일 경로. None이면 기본 경로 사용
+        """
+        if db_path is None:
+            db_path = self.DEFAULT_PATH
+        super().__init__(db_path)
+
+    def _init_tables(self) -> None:
+        """시세 관련 테이블 생성"""
         with self.get_cursor() as cursor:
             # ========================================
             # 종목 마스터 테이블
@@ -204,7 +276,7 @@ class Database:
             """)
 
             # ========================================
-            # [DEPRECATED] 기존 분봉 가격 테이블 (마이그레이션 후 제거 예정)
+            # [DEPRECATED] 기존 분봉 가격 테이블
             # ========================================
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS price_history (
@@ -222,7 +294,6 @@ class Database:
                 )
             """)
 
-            # 가격 조회 인덱스
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_price_stock_minute
                 ON price_history(stock_code, minute_key)
@@ -233,7 +304,50 @@ class Database:
                 ON price_history(stock_code, created_at)
             """)
 
+        logger.debug("MarketDataDB tables initialized")
+
+    def get_table_stats(self) -> dict:
+        """시세 테이블별 통계 조회"""
+        stats = {}
+        tables = ["stocks", "daily_candles", "minute_candles", "price_history"]
+
+        for table in tables:
+            try:
+                row = self.fetch_one(f"SELECT COUNT(*) as cnt FROM {table}")
+                stats[table] = row["cnt"] if row else 0
+            except Exception:
+                stats[table] = 0
+
+        return stats
+
+
+class TradingDB(Database):
+    """
+    매매 데이터 전용 DB (모의투자/실투자 분리)
+
+    테이블:
+    - orders: 주문 기록
+    - positions: 포지션
+    - daily_summary: 일일 거래 요약
+
+    파일명:
+    - 모의투자: trading_paper.db
+    - 실투자: trading_live.db
+    """
+
+    def __init__(self, db_path: Path):
+        """
+        Args:
+            db_path: DB 파일 경로 (trading_paper.db 또는 trading_live.db)
+        """
+        super().__init__(db_path)
+
+    def _init_tables(self) -> None:
+        """매매 관련 테이블 생성"""
+        with self.get_cursor() as cursor:
+            # ========================================
             # 주문 기록 테이블
+            # ========================================
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS orders (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -253,7 +367,6 @@ class Database:
                 )
             """)
 
-            # 주문 조회 인덱스
             cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_orders_stock
                 ON orders(stock_code)
@@ -269,7 +382,9 @@ class Database:
                 ON orders(created_at)
             """)
 
+            # ========================================
             # 포지션 테이블 (현재 보유)
+            # ========================================
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS positions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -285,7 +400,9 @@ class Database:
                 )
             """)
 
+            # ========================================
             # 일일 거래 요약 테이블
+            # ========================================
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS daily_summary (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -300,61 +417,12 @@ class Database:
                 )
             """)
 
-        logger.debug("Database tables initialized")
-
-    def execute(self, query: str, params: tuple = ()) -> sqlite3.Cursor:
-        """단일 쿼리 실행"""
-        with self.get_cursor() as cursor:
-            cursor.execute(query, params)
-            return cursor
-
-    def execute_many(self, query: str, params_list: list) -> None:
-        """다중 쿼리 실행"""
-        with self.get_cursor() as cursor:
-            cursor.executemany(query, params_list)
-
-    def fetch_one(self, query: str, params: tuple = ()) -> Optional[sqlite3.Row]:
-        """단일 행 조회"""
-        with self.get_cursor() as cursor:
-            cursor.execute(query, params)
-            return cursor.fetchone()
-
-    def fetch_all(self, query: str, params: tuple = ()) -> list:
-        """전체 행 조회"""
-        with self.get_cursor() as cursor:
-            cursor.execute(query, params)
-            return cursor.fetchall()
-
-    def close(self) -> None:
-        """현재 스레드의 연결 종료"""
-        if hasattr(self._local, "connection") and self._local.connection:
-            self._local.connection.close()
-            self._local.connection = None
-            logger.debug("Database connection closed")
-
-    def close_all(self) -> None:
-        """모든 연결 종료 (메인 스레드에서 호출)"""
-        self.close()
-        logger.info("All database connections closed")
-
-    def vacuum(self) -> None:
-        """DB 최적화 (압축)"""
-        with self.get_cursor() as cursor:
-            cursor.execute("VACUUM")
-        logger.info("Database vacuumed")
+        logger.debug("TradingDB tables initialized")
 
     def get_table_stats(self) -> dict:
-        """테이블별 통계 조회"""
+        """매매 테이블별 통계 조회"""
         stats = {}
-        tables = [
-            "stocks",
-            "daily_candles",
-            "minute_candles",
-            "price_history",  # deprecated
-            "orders",
-            "positions",
-            "daily_summary",
-        ]
+        tables = ["orders", "positions", "daily_summary"]
 
         for table in tables:
             try:

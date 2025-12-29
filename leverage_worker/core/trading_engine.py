@@ -25,7 +25,7 @@ from leverage_worker.core.recovery_manager import RecoveryManager
 from leverage_worker.core.scheduler import TradingScheduler
 from leverage_worker.core.session_manager import SessionManager
 from leverage_worker.data.daily_candle_repository import DailyCandle, DailyCandleRepository
-from leverage_worker.data.database import Database
+from leverage_worker.data.database import MarketDataDB, TradingDB
 from leverage_worker.data.minute_candle_repository import MinuteCandleRepository
 from leverage_worker.notification.daily_report import DailyReportGenerator
 from leverage_worker.notification.slack_notifier import SlackNotifier
@@ -63,14 +63,17 @@ class TradingEngine:
         # 컴포넌트 초기화
         logger.info(f"Initializing TradingEngine (mode: {settings.mode.value})")
 
-        # 1. Database
-        self._db = Database()
+        # 1. Database (시세 DB / 매매 DB 분리)
+        # 시세 DB: 모의/실전 공유 (market_data.db)
+        self._market_db = MarketDataDB(settings.market_data_db_path)
+        # 매매 DB: 모의/실전 분리 (trading_paper.db / trading_live.db)
+        self._trading_db = TradingDB(settings.trading_db_path)
 
-        # 2. Minute Candle Repository (분봉 데이터)
-        self._price_repo = MinuteCandleRepository(self._db)
+        # 2. Minute Candle Repository (분봉 데이터 - 시세 DB)
+        self._price_repo = MinuteCandleRepository(self._market_db)
 
-        # 2-1. Daily Candle Repository (일봉 데이터)
-        self._daily_repo = DailyCandleRepository(self._db)
+        # 2-1. Daily Candle Repository (일봉 데이터 - 시세 DB)
+        self._daily_repo = DailyCandleRepository(self._market_db)
 
         # 2-2. 일봉 캐시: stock_code -> List[DailyCandle]
         self._daily_candles_cache: Dict[str, List[DailyCandle]] = {}
@@ -97,8 +100,8 @@ class TradingEngine:
             channel=settings.notification.slack_channel,
         )
 
-        # 9. Daily Report Generator
-        self._report_generator = DailyReportGenerator(self._db, self._slack)
+        # 9. Daily Report Generator (매매 DB 사용)
+        self._report_generator = DailyReportGenerator(self._trading_db, self._slack)
 
         # 10. 전략 인스턴스 캐시: (stock_code, strategy_name) -> BaseStrategy
         self._strategies: Dict[tuple, BaseStrategy] = {}
@@ -183,16 +186,16 @@ class TradingEngine:
             logger.info("Fetching account balance...")
             self._print_account_balance()
 
-            # 4. 포지션 매니저 초기화
-            self._position_manager = PositionManager(self._broker, self._db)
+            # 4. 포지션 매니저 초기화 (매매 DB 사용)
+            self._position_manager = PositionManager(self._broker, self._trading_db)
             self._position_manager.load_from_db()
             self._position_manager.sync_with_broker()
 
-            # 5. 주문 매니저 초기화
+            # 5. 주문 매니저 초기화 (매매 DB 사용)
             self._order_manager = OrderManager(
                 self._broker,
                 self._position_manager,
-                self._db,
+                self._trading_db,
             )
 
             # 5-1. 일봉 데이터 로드 (전략 판단용)
@@ -228,7 +231,10 @@ class TradingEngine:
                 "api", create_api_health_check(self._session)
             )
             self._health_checker.register_check(
-                "database", create_db_health_check(self._db)
+                "market_db", create_db_health_check(self._market_db)
+            )
+            self._health_checker.register_check(
+                "trading_db", create_db_health_check(self._trading_db)
             )
             self._health_checker.register_check(
                 "scheduler", create_scheduler_health_check(self._scheduler)
@@ -296,7 +302,8 @@ class TradingEngine:
             self._recovery_manager.stop_session()
 
             # 7. DB 연결 종료
-            self._db.close_all()
+            self._market_db.close_all()
+            self._trading_db.close_all()
 
             # 8. Slack 종료 알림
             self._slack.notify_stop()
