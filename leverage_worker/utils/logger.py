@@ -3,13 +3,98 @@
 
 파일 + 콘솔 동시 출력
 일별 로그 파일 생성
+민감정보 마스킹 (API 키, 토큰, 계좌번호 등)
 """
 
 import logging
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Tuple
+
+
+class SensitiveDataFilter(logging.Filter):
+    """
+    민감정보 마스킹 필터
+
+    로그 메시지에서 다음 정보를 마스킹:
+    - app_key, app_secret: API 키
+    - authorization/Bearer 토큰
+    - 계좌번호 (8자리-2자리 형식)
+    - password 관련 값
+    """
+
+    PATTERNS: List[Tuple[re.Pattern, str]] = [
+        # app_key, app_secret 마스킹 (JSON, YAML, 할당문 등)
+        (
+            re.compile(
+                r'(app_key|appkey|APP_KEY)["\']?\s*[:=]\s*["\']?([A-Za-z0-9_-]{8,})["\']?',
+                re.IGNORECASE
+            ),
+            r'\1: ***MASKED***'
+        ),
+        (
+            re.compile(
+                r'(app_secret|appsecret|APP_SECRET)["\']?\s*[:=]\s*["\']?([A-Za-z0-9_-]{8,})["\']?',
+                re.IGNORECASE
+            ),
+            r'\1: ***MASKED***'
+        ),
+        # Authorization Bearer 토큰 마스킹
+        (
+            re.compile(
+                r'(authorization|bearer)["\']?\s*[:=]?\s*["\']?Bearer\s+([A-Za-z0-9._-]+)',
+                re.IGNORECASE
+            ),
+            r'\1: Bearer ***TOKEN***'
+        ),
+        # 계좌번호 마스킹 (8자리-2자리 형식)
+        (
+            re.compile(r'(\d{8})-(\d{2})'),
+            r'********-\2'
+        ),
+        # password 마스킹
+        (
+            re.compile(
+                r'(password|passwd|pwd)["\']?\s*[:=]\s*["\']?([^"\'\s,}]+)',
+                re.IGNORECASE
+            ),
+            r'\1: ***MASKED***'
+        ),
+        # 토큰 값 직접 마스킹 (긴 영숫자 문자열이 토큰처럼 보이는 경우)
+        (
+            re.compile(
+                r'(access_token|token)["\']?\s*[:=]\s*["\']?([A-Za-z0-9._-]{20,})["\']?',
+                re.IGNORECASE
+            ),
+            r'\1: ***TOKEN***'
+        ),
+    ]
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        """로그 레코드에서 민감정보를 마스킹"""
+        # 메시지 마스킹
+        if hasattr(record, 'msg') and isinstance(record.msg, str):
+            record.msg = self._mask_sensitive_data(record.msg)
+
+        # args 마스킹 (% 포맷팅 사용 시)
+        if hasattr(record, 'args') and record.args:
+            masked_args = []
+            for arg in record.args:
+                if isinstance(arg, str):
+                    masked_args.append(self._mask_sensitive_data(arg))
+                else:
+                    masked_args.append(arg)
+            record.args = tuple(masked_args)
+
+        return True
+
+    def _mask_sensitive_data(self, text: str) -> str:
+        """텍스트에서 민감정보를 마스킹"""
+        for pattern, replacement in self.PATTERNS:
+            text = pattern.sub(replacement, text)
+        return text
 
 
 def setup_logger(
@@ -39,6 +124,10 @@ def setup_logger(
         return logger
 
     logger.setLevel(level)
+
+    # 민감정보 마스킹 필터 추가
+    sensitive_filter = SensitiveDataFilter()
+    logger.addFilter(sensitive_filter)
 
     # 포맷터 설정
     console_formatter = logging.Formatter(
@@ -104,6 +193,9 @@ class TradeLogger:
         self._log_dir = log_dir
         self._logger = logging.getLogger("trade_log")
         self._logger.setLevel(logging.INFO)
+
+        # 민감정보 마스킹 필터 추가
+        self._logger.addFilter(SensitiveDataFilter())
 
         # 중복 방지
         if not self._logger.handlers:

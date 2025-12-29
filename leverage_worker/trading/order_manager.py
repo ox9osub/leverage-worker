@@ -5,6 +5,7 @@
 - 중복 주문 방지
 - 주문 상태 추적
 - 체결 확인 및 포지션 업데이트
+- 감사 추적 (SQLite)
 """
 
 from dataclasses import dataclass, field
@@ -22,6 +23,7 @@ from leverage_worker.trading.broker import (
 )
 from leverage_worker.trading.position_manager import PositionManager
 from leverage_worker.utils.logger import get_logger
+from leverage_worker.utils.audit_logger import get_audit_logger
 
 logger = get_logger(__name__)
 
@@ -95,6 +97,9 @@ class OrderManager:
         # 콜백
         self._on_fill_callback: Optional[Callable] = None
 
+        # 감사 추적 로거
+        self._audit = get_audit_logger()
+
         logger.info("OrderManager initialized")
 
     def set_on_fill_callback(self, callback: Callable) -> None:
@@ -107,6 +112,7 @@ class OrderManager:
         stock_name: str,
         quantity: int,
         strategy_name: str,
+        check_deposit: bool = True,
     ) -> Optional[str]:
         """
         매수 주문 실행
@@ -116,6 +122,7 @@ class OrderManager:
             stock_name: 종목명
             quantity: 수량
             strategy_name: 전략 이름
+            check_deposit: 예수금 확인 여부 (기본: True)
 
         Returns:
             주문 ID 또는 None (실패 시)
@@ -123,13 +130,92 @@ class OrderManager:
         # 중복 주문 체크
         if stock_code in self._pending_stocks:
             logger.warning(f"Duplicate order blocked: {stock_code}")
+            self._audit.log_order(
+                event_type="ORDER_REJECTED",
+                module="OrderManager",
+                stock_code=stock_code,
+                stock_name=stock_name,
+                order_id=None,
+                side="BUY",
+                quantity=quantity,
+                price=0,
+                strategy_name=strategy_name,
+                status="rejected",
+                reason="duplicate_order_blocked",
+            )
             return None
+
+        # 예수금 확인 (시장가 주문 시 현재가 기준으로 계산)
+        if check_deposit:
+            price_info = self._broker.get_current_price(stock_code)
+            if not price_info:
+                logger.error(f"Cannot get price for deposit check: {stock_code}")
+                self._audit.log_order(
+                    event_type="ORDER_REJECTED",
+                    module="OrderManager",
+                    stock_code=stock_code,
+                    stock_name=stock_name,
+                    order_id=None,
+                    side="BUY",
+                    quantity=quantity,
+                    price=0,
+                    strategy_name=strategy_name,
+                    status="rejected",
+                    reason="price_fetch_failed",
+                )
+                return None
+
+            current_price = price_info.current_price
+            # 1% 마진 적용 (시장가 슬리피지 대비)
+            required_amount = int(current_price * quantity * 1.01)
+
+            deposit = self._broker.get_deposit()
+            if deposit is None:
+                logger.warning(f"Cannot get deposit, proceeding without check: {stock_code}")
+            elif deposit < required_amount:
+                logger.warning(
+                    f"Insufficient deposit for {stock_code}: "
+                    f"required={required_amount:,}, available={deposit:,}"
+                )
+                self._audit.log_order(
+                    event_type="ORDER_REJECTED",
+                    module="OrderManager",
+                    stock_code=stock_code,
+                    stock_name=stock_name,
+                    order_id=None,
+                    side="BUY",
+                    quantity=quantity,
+                    price=current_price,
+                    strategy_name=strategy_name,
+                    status="rejected",
+                    reason="insufficient_deposit",
+                    metadata={"required": required_amount, "available": deposit},
+                )
+                return None
+
+            logger.debug(
+                f"Deposit check passed: {stock_code} "
+                f"required={required_amount:,}, available={deposit:,}"
+            )
 
         # 주문 실행
         result = self._broker.place_market_order(stock_code, OrderSide.BUY, quantity)
 
         if not result.success:
             logger.error(f"Buy order failed: {stock_code} - {result.message}")
+            self._audit.log_order(
+                event_type="ORDER_REJECTED",
+                module="OrderManager",
+                stock_code=stock_code,
+                stock_name=stock_name,
+                order_id=None,
+                side="BUY",
+                quantity=quantity,
+                price=0,
+                strategy_name=strategy_name,
+                status="rejected",
+                reason=f"broker_rejected: {result.message}",
+            )
             return None
 
         # 주문 등록
@@ -149,6 +235,20 @@ class OrderManager:
 
         # DB 저장
         self._save_order_to_db(order)
+
+        # 감사 로그 기록 (주문 접수)
+        self._audit.log_order(
+            event_type="ORDER_SUBMIT",
+            module="OrderManager",
+            stock_code=stock_code,
+            stock_name=stock_name,
+            order_id=result.order_id,
+            side="BUY",
+            quantity=quantity,
+            price=result.price,
+            strategy_name=strategy_name,
+            status="submitted",
+        )
 
         logger.info(f"Buy order placed: {stock_code} x {quantity} (ID: {result.order_id})")
 
@@ -176,6 +276,19 @@ class OrderManager:
         # 중복 주문 체크
         if stock_code in self._pending_stocks:
             logger.warning(f"Duplicate order blocked: {stock_code}")
+            self._audit.log_order(
+                event_type="ORDER_REJECTED",
+                module="OrderManager",
+                stock_code=stock_code,
+                stock_name=stock_name,
+                order_id=None,
+                side="SELL",
+                quantity=quantity,
+                price=0,
+                strategy_name=strategy_name or "",
+                status="rejected",
+                reason="duplicate_order_blocked",
+            )
             return None
 
         # 주문 실행
@@ -183,6 +296,19 @@ class OrderManager:
 
         if not result.success:
             logger.error(f"Sell order failed: {stock_code} - {result.message}")
+            self._audit.log_order(
+                event_type="ORDER_REJECTED",
+                module="OrderManager",
+                stock_code=stock_code,
+                stock_name=stock_name,
+                order_id=None,
+                side="SELL",
+                quantity=quantity,
+                price=0,
+                strategy_name=strategy_name or "",
+                status="rejected",
+                reason=f"broker_rejected: {result.message}",
+            )
             return None
 
         # 주문 등록
@@ -202,6 +328,20 @@ class OrderManager:
 
         # DB 저장
         self._save_order_to_db(order)
+
+        # 감사 로그 기록 (주문 접수)
+        self._audit.log_order(
+            event_type="ORDER_SUBMIT",
+            module="OrderManager",
+            stock_code=stock_code,
+            stock_name=stock_name,
+            order_id=result.order_id,
+            side="SELL",
+            quantity=quantity,
+            price=result.price,
+            strategy_name=strategy_name or "",
+            status="submitted",
+        )
 
         logger.info(f"Sell order placed: {stock_code} x {quantity} (ID: {result.order_id})")
 
@@ -267,6 +407,24 @@ class OrderManager:
 
     def _handle_fill(self, order: ManagedOrder, filled_qty: int) -> None:
         """체결 처리"""
+        # 감사 로그 기록 (체결)
+        self._audit.log_order(
+            event_type="ORDER_FILLED",
+            module="OrderManager",
+            stock_code=order.stock_code,
+            stock_name=order.stock_name,
+            order_id=order.order_id,
+            side=order.side.value,
+            quantity=filled_qty,
+            price=order.filled_price,
+            strategy_name=order.strategy_name or "",
+            status="filled",
+            metadata={
+                "total_filled": order.filled_qty,
+                "remaining": order.remaining_qty,
+            },
+        )
+
         if order.side == OrderSide.BUY:
             # 매수 체결 → 포지션 추가
             self._position_manager.add_position(
@@ -312,6 +470,21 @@ class OrderManager:
             self._pending_stocks.discard(order.stock_code)
             self._update_order_in_db(order)
 
+            # 감사 로그 기록 (취소)
+            self._audit.log_order(
+                event_type="ORDER_CANCELLED",
+                module="OrderManager",
+                stock_code=order.stock_code,
+                stock_name=order.stock_name,
+                order_id=order_id,
+                side=order.side.value,
+                quantity=order.remaining_qty,
+                price=order.price,
+                strategy_name=order.strategy_name or "",
+                status="cancelled",
+                reason="user_requested",
+            )
+
         return success
 
     def cancel_all_pending(self) -> int:
@@ -323,11 +496,26 @@ class OrderManager:
         """
         cancelled = self._broker.cancel_all_pending_orders()
 
-        # 내부 상태 정리
+        # 내부 상태 정리 + 감사 로깅
         for order in list(self._active_orders.values()):
             order.state = OrderState.CANCELLED
             order.updated_at = datetime.now()
             self._update_order_in_db(order)
+
+            # 감사 로그 기록 (일괄 취소)
+            self._audit.log_order(
+                event_type="ORDER_CANCELLED",
+                module="OrderManager",
+                stock_code=order.stock_code,
+                stock_name=order.stock_name,
+                order_id=order.order_id,
+                side=order.side.value,
+                quantity=order.remaining_qty,
+                price=order.price,
+                strategy_name=order.strategy_name or "",
+                status="cancelled",
+                reason="cancel_all_pending",
+            )
 
         self._active_orders.clear()
         self._pending_stocks.clear()

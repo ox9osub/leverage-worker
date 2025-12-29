@@ -95,6 +95,14 @@ class TradingSignal:
 
 
 @dataclass
+class PriceValidationResult:
+    """가격 데이터 검증 결과"""
+    is_valid: bool
+    warnings: List[str] = field(default_factory=list)
+    errors: List[str] = field(default_factory=list)
+
+
+@dataclass
 class StrategyContext:
     """
     전략 실행 컨텍스트
@@ -160,6 +168,74 @@ class StrategyContext:
             return None
         return sum(prices) / len(prices)
 
+    def has_sufficient_data(self, min_required: int) -> bool:
+        """
+        충분한 가격 데이터가 있는지 확인
+
+        Args:
+            min_required: 최소 필요 데이터 개수
+
+        Returns:
+            True if sufficient data, False otherwise
+        """
+        return len(self.price_history) >= min_required
+
+    def validate_price_data(self, spike_threshold: float = 0.30) -> PriceValidationResult:
+        """
+        가격 데이터 유효성 검증
+
+        Args:
+            spike_threshold: 급등락 임계값 (기본 30%)
+
+        Returns:
+            PriceValidationResult 객체
+        """
+        warnings = []
+        errors = []
+
+        # 현재가 검증
+        if self.current_price <= 0:
+            errors.append(f"Invalid current price: {self.current_price}")
+
+        # 가격 히스토리 검증
+        if not self.price_history:
+            errors.append("Empty price history")
+        else:
+            # 가격 스파이크 검증
+            for i in range(1, len(self.price_history)):
+                prev_close = self.price_history[i - 1].close_price
+                curr_close = self.price_history[i].close_price
+
+                if prev_close > 0:
+                    change_rate = abs(curr_close - prev_close) / prev_close
+                    if change_rate > spike_threshold:
+                        warnings.append(
+                            f"Price spike detected: {prev_close} -> {curr_close} "
+                            f"({change_rate * 100:.1f}%)"
+                        )
+
+            # 현재가와 최신 히스토리 가격 비교
+            latest_close = self.price_history[-1].close_price
+            if latest_close > 0:
+                current_change = abs(self.current_price - latest_close) / latest_close
+                if current_change > spike_threshold:
+                    warnings.append(
+                        f"Current price spike: history={latest_close}, "
+                        f"current={self.current_price} ({current_change * 100:.1f}%)"
+                    )
+
+            # 0 또는 음수 가격 검증
+            for i, candle in enumerate(self.price_history):
+                if candle.close_price <= 0:
+                    errors.append(f"Invalid close price at index {i}: {candle.close_price}")
+                if candle.high_price < candle.low_price:
+                    warnings.append(
+                        f"High < Low at index {i}: high={candle.high_price}, low={candle.low_price}"
+                    )
+
+        is_valid = len(errors) == 0
+        return PriceValidationResult(is_valid=is_valid, warnings=warnings, errors=errors)
+
 
 class BaseStrategy(ABC):
     """
@@ -167,6 +243,9 @@ class BaseStrategy(ABC):
 
     모든 전략은 이 클래스를 상속받아야 함
     """
+
+    # 기본 최소 데이터 요구량 (하위 클래스에서 오버라이드 가능)
+    MIN_DATA_REQUIRED = 20
 
     def __init__(self, name: str, params: Optional[Dict[str, Any]] = None):
         """
@@ -187,9 +266,40 @@ class BaseStrategy(ABC):
         """전략 파라미터"""
         return self._params
 
+    @property
+    def min_data_required(self) -> int:
+        """
+        전략이 필요로 하는 최소 데이터 개수
+
+        하위 클래스에서 MIN_DATA_REQUIRED를 오버라이드하거나
+        이 프로퍼티를 오버라이드하여 동적으로 계산 가능
+        """
+        return self.MIN_DATA_REQUIRED
+
     def get_param(self, key: str, default: Any = None) -> Any:
         """파라미터 값 조회"""
         return self._params.get(key, default)
+
+    def can_generate_signal(self, context: StrategyContext) -> bool:
+        """
+        시그널 생성이 가능한지 확인
+
+        Args:
+            context: 전략 실행 컨텍스트
+
+        Returns:
+            True if signal generation is possible
+        """
+        # 충분한 데이터가 있는지 확인
+        if not context.has_sufficient_data(self.min_data_required):
+            return False
+
+        # 가격 데이터 유효성 확인
+        validation = context.validate_price_data()
+        if not validation.is_valid:
+            return False
+
+        return True
 
     @abstractmethod
     def generate_signal(self, context: StrategyContext) -> TradingSignal:

@@ -165,30 +165,86 @@ class DailyReportGenerator:
         """
         매도 거래의 손익 계산
 
-        간단 버전: 같은 종목의 직전 매수 체결가와 비교
+        가중평균 매입가 기준으로 계산:
+        - 매도 시점까지의 모든 매수 주문을 조회
+        - 가중평균 매입가 계산
+        - (매도가 - 평균매입가) × 수량
         """
         stock_code = sell_order["stock_code"]
         sell_price = sell_order["filled_price"]
         sell_qty = sell_order["filled_quantity"]
         sell_time = sell_order["created_at"]
 
-        # 직전 매수 주문 찾기
+        # 매도 시점 이전의 모든 매수 주문 조회
         query = """
-            SELECT filled_price FROM orders
+            SELECT filled_price, filled_quantity, created_at FROM orders
             WHERE stock_code = ? AND side = 'buy' AND status = 'filled'
             AND created_at < ?
-            ORDER BY created_at DESC
-            LIMIT 1
+            ORDER BY created_at ASC
         """
 
-        row = self._db.fetch_one(query, (stock_code, sell_time))
+        buy_orders = self._db.fetch_all(query, (stock_code, sell_time))
 
-        if row:
-            buy_price = row["filled_price"]
-            pnl = (sell_price - buy_price) * sell_qty
+        if not buy_orders:
+            return 0
+
+        # 매도 시점 이전의 모든 매도 주문도 조회 (이미 청산된 물량 계산)
+        sell_query = """
+            SELECT filled_quantity FROM orders
+            WHERE stock_code = ? AND side = 'sell' AND status = 'filled'
+            AND created_at < ?
+        """
+
+        prev_sells = self._db.fetch_all(sell_query, (stock_code, sell_time))
+        prev_sell_qty = sum(row["filled_quantity"] for row in prev_sells) if prev_sells else 0
+
+        # 가중평균 매입가 계산 (FIFO 방식)
+        remaining_position = 0
+        total_cost = 0
+
+        for buy in buy_orders:
+            buy_qty = buy["filled_quantity"]
+            buy_price = buy["filled_price"]
+
+            remaining_position += buy_qty
+            total_cost += buy_qty * buy_price
+
+        # 이전 매도 물량 차감
+        if prev_sell_qty > 0:
+            # FIFO 방식으로 이전 매도분 차감
+            remaining_qty = remaining_position - prev_sell_qty
+            if remaining_qty <= 0:
+                return 0
+
+            remaining_position = remaining_qty
+
+        # 평균 매입가 계산
+        if remaining_position > 0:
+            avg_cost = total_cost / (remaining_position + prev_sell_qty)
+            pnl = (sell_price - avg_cost) * sell_qty
             return int(pnl)
 
         return 0
+
+    def _calculate_trade_pnl_with_avg_cost(self, sell_order: dict, avg_cost: float) -> int:
+        """
+        평균 매입가가 제공된 경우의 손익 계산
+
+        Args:
+            sell_order: 매도 주문 정보
+            avg_cost: 평균 매입가
+
+        Returns:
+            손익 (원)
+        """
+        sell_price = sell_order["filled_price"]
+        sell_qty = sell_order["filled_quantity"]
+
+        if avg_cost <= 0:
+            return 0
+
+        pnl = (sell_price - avg_cost) * sell_qty
+        return int(pnl)
 
     def save_to_db(self, report: DailyReport) -> None:
         """리포트 DB 저장"""

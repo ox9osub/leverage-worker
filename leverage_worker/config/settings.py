@@ -3,14 +3,18 @@
 
 TradingMode: 모의/실전 투자 모드
 Settings: 전역 설정 관리 클래스
+ConfigValidationResult: 설정 검증 결과
 """
 
+import logging
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 import yaml
+
+logger = logging.getLogger(__name__)
 
 
 class TradingMode(Enum):
@@ -54,6 +58,21 @@ class NotificationConfig:
     slack_channel: Optional[str] = None  # Channel ID (C...)
     enable_trade_alerts: bool = True
     enable_daily_report: bool = True
+
+
+@dataclass
+class ConfigValidationResult:
+    """설정 검증 결과"""
+    is_valid: bool
+    errors: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
+
+    def add_error(self, message: str) -> None:
+        self.errors.append(message)
+        self.is_valid = False
+
+    def add_warning(self, message: str) -> None:
+        self.warnings.append(message)
 
 
 class Settings:
@@ -209,3 +228,110 @@ class Settings:
     def get_env_division(self) -> str:
         """API 호출용 환경 구분 (real/demo)"""
         return "demo" if self.mode == TradingMode.PAPER else "real"
+
+    def validate(self, strategy_registry=None) -> ConfigValidationResult:
+        """
+        설정 유효성 검증
+
+        Args:
+            strategy_registry: StrategyRegistry 인스턴스 (전략 이름 검증용)
+
+        Returns:
+            ConfigValidationResult 객체
+        """
+        result = ConfigValidationResult(is_valid=True)
+
+        # 1. 자격증명 검증
+        if not self.app_key:
+            result.add_error("app_key is missing")
+        elif len(self.app_key) < 8:
+            result.add_warning("app_key seems too short")
+
+        if not self.app_secret:
+            result.add_error("app_secret is missing")
+        elif len(self.app_secret) < 8:
+            result.add_warning("app_secret seems too short")
+
+        if not self.account_number:
+            result.add_error("account_number is missing")
+
+        # 2. 종목 설정 검증
+        if not self._stocks:
+            result.add_warning("No stocks configured")
+        else:
+            for code, stock in self._stocks.items():
+                # 종목코드 형식 검증 (6자리 숫자)
+                if not code.isdigit() or len(code) != 6:
+                    result.add_warning(f"Stock code '{code}' may be invalid (expected 6 digits)")
+
+                # 전략 설정 검증
+                if not stock.strategies:
+                    result.add_warning(f"Stock '{code}' ({stock.name}) has no strategies")
+                else:
+                    for i, strategy_cfg in enumerate(stock.strategies):
+                        strategy_name = strategy_cfg.get("name")
+                        if not strategy_name:
+                            result.add_error(
+                                f"Stock '{code}' strategy[{i}]: 'name' is missing"
+                            )
+                        elif strategy_registry:
+                            # 전략 레지스트리에서 전략 존재 확인
+                            if not strategy_registry.has_strategy(strategy_name):
+                                result.add_error(
+                                    f"Stock '{code}': strategy '{strategy_name}' not found in registry"
+                                )
+
+                        # allocation 검증
+                        allocation = strategy_cfg.get("allocation", 0)
+                        if allocation <= 0:
+                            result.add_warning(
+                                f"Stock '{code}' strategy '{strategy_name}': "
+                                f"allocation is 0 or negative"
+                            )
+                        elif allocation > 100:
+                            result.add_warning(
+                                f"Stock '{code}' strategy '{strategy_name}': "
+                                f"allocation > 100% ({allocation}%)"
+                            )
+
+        # 3. 스케줄 검증
+        try:
+            start_parts = self.schedule.trading_start.split(":")
+            end_parts = self.schedule.trading_end.split(":")
+            start_hour = int(start_parts[0])
+            end_hour = int(end_parts[0])
+
+            if start_hour < 8 or start_hour > 10:
+                result.add_warning(f"Unusual trading_start: {self.schedule.trading_start}")
+            if end_hour < 15 or end_hour > 16:
+                result.add_warning(f"Unusual trading_end: {self.schedule.trading_end}")
+        except (ValueError, IndexError):
+            result.add_error("Invalid trading_start or trading_end format")
+
+        # 4. 알림 설정 검증
+        if self.notification.enable_trade_alerts:
+            if not self.notification.slack_webhook_url and not self.notification.slack_token:
+                result.add_warning("Trade alerts enabled but no Slack credentials configured")
+
+        # 로깅
+        if not result.is_valid:
+            for error in result.errors:
+                logger.error(f"Config validation error: {error}")
+        for warning in result.warnings:
+            logger.warning(f"Config validation warning: {warning}")
+
+        return result
+
+    def validate_or_raise(self, strategy_registry=None) -> None:
+        """
+        설정 검증 후 에러가 있으면 예외 발생
+
+        Args:
+            strategy_registry: StrategyRegistry 인스턴스
+
+        Raises:
+            ValueError: 설정에 에러가 있을 경우
+        """
+        result = self.validate(strategy_registry)
+        if not result.is_valid:
+            raise ValueError(f"Configuration validation failed: {', '.join(result.errors)}")

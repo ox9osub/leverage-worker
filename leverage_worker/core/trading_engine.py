@@ -9,10 +9,19 @@
 
 import signal
 import sys
+import uuid
 from datetime import datetime
 from typing import Dict, List, Optional
 
 from leverage_worker.config.settings import Settings, TradingMode
+from leverage_worker.core.emergency import EmergencyStop, create_emergency_stop_handler
+from leverage_worker.core.health_checker import (
+    HealthChecker,
+    create_api_health_check,
+    create_db_health_check,
+    create_scheduler_health_check,
+)
+from leverage_worker.core.recovery_manager import RecoveryManager
 from leverage_worker.core.scheduler import TradingScheduler
 from leverage_worker.core.session_manager import SessionManager
 from leverage_worker.data.database import Database
@@ -29,9 +38,12 @@ from leverage_worker.trading.broker import KISBroker, Position, OrderSide
 from leverage_worker.trading.order_manager import OrderManager
 from leverage_worker.trading.position_manager import PositionManager
 from leverage_worker.utils.logger import get_logger
+from leverage_worker.utils.log_constants import LogEventType
+from leverage_worker.utils.structured_logger import get_structured_logger
 from leverage_worker.utils.time_utils import get_current_minute_key
 
 logger = get_logger(__name__)
+structured_logger = get_structured_logger()
 
 
 class TradingEngine:
@@ -84,11 +96,36 @@ class TradingEngine:
         # 10. 전략 인스턴스 캐시: (stock_code, strategy_name) -> BaseStrategy
         self._strategies: Dict[tuple, BaseStrategy] = {}
 
+        # 11. Health Checker
+        self._health_checker = HealthChecker(
+            check_interval_seconds=60,
+            on_health_change=self._on_health_change,
+        )
+
+        # 12. Recovery Manager
+        self._recovery_manager = RecoveryManager(
+            on_crash_detected=self._on_crash_detected,
+        )
+
+        # 13. Emergency Stop (핸들러는 start()에서 설정)
+        self._emergency_stop = EmergencyStop(
+            check_interval_seconds=5,
+        )
+
+        # 세션 ID
+        self._session_id = str(uuid.uuid4())[:8]
+
         # 시그널 핸들러
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
         logger.info("TradingEngine initialized")
+        structured_logger.module_init(
+            "TradingEngine",
+            mode=settings.mode.value,
+            session_id=self._session_id,
+            stocks_count=len(settings.stocks),
+        )
 
     def _signal_handler(self, signum, frame) -> None:
         """시그널 핸들러 (Ctrl+C 등)"""
@@ -98,6 +135,33 @@ class TradingEngine:
     def start(self) -> None:
         """엔진 시작"""
         try:
+            structured_logger.module_start("TradingEngine", session_id=self._session_id)
+
+            # 0. 설정 검증
+            logger.info("Validating configuration...")
+            validation = self._settings.validate()
+            if not validation.is_valid:
+                for error in validation.errors:
+                    logger.error(f"Config error: {error}")
+                raise RuntimeError(f"Configuration validation failed: {validation.errors}")
+            for warning in validation.warnings:
+                logger.warning(f"Config warning: {warning}")
+
+            # 0-1. 이전 크래시 확인 및 복구
+            crashed_session = self._recovery_manager.check_previous_crash()
+            if crashed_session:
+                logger.warning(
+                    f"Recovered from previous crash: session={crashed_session.session_id}, "
+                    f"active_orders={len(crashed_session.active_orders)}"
+                )
+                self._slack.send_alert(
+                    title="⚠️ 이전 세션 크래시 감지",
+                    message=f"세션 ID: {crashed_session.session_id}\n"
+                            f"마지막 하트비트: {crashed_session.last_heartbeat}\n"
+                            f"미처리 주문: {len(crashed_session.active_orders)}건",
+                    level="warning",
+                )
+
             # 1. 인증
             logger.info("Authenticating...")
             if not self._session.authenticate():
@@ -140,12 +204,43 @@ class TradingEngine:
             self._running = True
             self._scheduler.start()
 
+            # 10. 헬스체크 시작
+            self._health_checker.register_check(
+                "api", create_api_health_check(self._session)
+            )
+            self._health_checker.register_check(
+                "database", create_db_health_check(self._db)
+            )
+            self._health_checker.register_check(
+                "scheduler", create_scheduler_health_check(self._scheduler)
+            )
+            self._health_checker.start_background_check()
+
+            # 11. 복구 관리자 세션 시작
+            self._recovery_manager.start_session(self._session_id)
+
+            # 12. 긴급 중지 핸들러 설정 및 시작
+            emergency_handler = create_emergency_stop_handler(
+                order_manager=self._order_manager,
+                slack_notifier=self._slack,
+                on_stopped=self.stop,
+            )
+            self._emergency_stop._on_emergency_stop = emergency_handler
+            self._emergency_stop.start()
+
             logger.info("TradingEngine started")
 
             # 메인 스레드 대기
             while self._running:
                 import time
                 time.sleep(1)
+
+                # 활성 주문 목록 업데이트 (복구용)
+                if self._order_manager:
+                    active_orders = [
+                        o["order_id"] for o in self._order_manager.get_active_orders()
+                    ]
+                    self._recovery_manager.update_active_orders(active_orders)
 
         except Exception as e:
             logger.error(f"Engine start error: {e}")
@@ -161,27 +256,42 @@ class TradingEngine:
         logger.info("Stopping TradingEngine...")
 
         try:
-            # 1. 스케줄러 중지
+            # 1. 긴급 중지 감시 중지
+            self._emergency_stop.stop()
+
+            # 2. 헬스체크 중지
+            self._health_checker.stop_background_check()
+
+            # 3. 스케줄러 중지
             self._scheduler.stop()
 
-            # 2. 미체결 주문 취소
+            # 4. 미체결 주문 취소
             if self._order_manager:
                 cancelled = self._order_manager.cancel_all_pending()
                 logger.info(f"Cancelled {cancelled} pending orders")
 
-            # 3. 토큰 갱신 중지
+            # 5. 토큰 갱신 중지
             self._session.stop_auto_refresh()
 
-            # 4. DB 연결 종료
+            # 6. 복구 관리자 세션 종료 (정상 종료 기록)
+            self._recovery_manager.stop_session()
+
+            # 7. DB 연결 종료
             self._db.close_all()
 
-            # 5. Slack 종료 알림
+            # 8. Slack 종료 알림
             self._slack.notify_stop()
 
             logger.info("TradingEngine stopped")
+            structured_logger.module_stop("TradingEngine", session_id=self._session_id)
 
         except Exception as e:
             logger.error(f"Engine stop error: {e}")
+            structured_logger.module_error(
+                "TradingEngine",
+                error=str(e),
+                session_id=self._session_id,
+            )
 
     def _load_strategies(self) -> None:
         """전략 인스턴스 로드"""
@@ -278,6 +388,15 @@ class TradingEngine:
                     position=broker_position,
                     today_trade_count=self._order_manager.get_today_trade_count(stock_code),
                 )
+
+                # 시그널 생성 가능 여부 확인 (데이터 충분성, 가격 유효성)
+                if not strategy.can_generate_signal(context):
+                    validation = context.validate_price_data()
+                    if not validation.is_valid:
+                        logger.warning(
+                            f"[{stock_code}] Cannot generate signal: {validation.errors}"
+                        )
+                    continue
 
                 # 시그널 생성
                 signal = strategy.generate_signal(context)
@@ -414,4 +533,84 @@ class TradingEngine:
             "positions": len(self._position_manager.get_all_positions()) if self._position_manager else 0,
             "active_orders": len(self._order_manager.get_active_orders()) if self._order_manager else 0,
             "strategies": len(self._strategies),
+            "session_id": self._session_id,
+            "health": self._health_checker.get_last_health().to_dict() if self._health_checker.get_last_health() else None,
         }
+
+    def _on_health_change(self, health) -> None:
+        """
+        헬스 상태 변경 콜백
+
+        Args:
+            health: SystemHealth 객체
+        """
+        from leverage_worker.core.health_checker import HealthStatus
+
+        if health.overall_status == HealthStatus.UNHEALTHY:
+            # 심각한 상태 - 알림 전송
+            unhealthy_components = [
+                name for name, comp in health.components.items()
+                if comp.status == HealthStatus.UNHEALTHY
+            ]
+            logger.error(f"System UNHEALTHY: {unhealthy_components}")
+
+            self._slack.send_alert(
+                title="🚨 시스템 헬스 이상",
+                message=f"비정상 컴포넌트: {', '.join(unhealthy_components)}\n"
+                        f"세션 ID: {self._session_id}",
+                level="critical",
+            )
+
+            structured_logger.log(
+                LogEventType.HEALTH_CHECK,
+                "TradingEngine",
+                f"System unhealthy: {unhealthy_components}",
+                level="ERROR",
+                unhealthy_components=unhealthy_components,
+                session_id=self._session_id,
+            )
+
+        elif health.overall_status == HealthStatus.DEGRADED:
+            # 저하 상태 - 경고 로깅
+            degraded_components = [
+                name for name, comp in health.components.items()
+                if comp.status == HealthStatus.DEGRADED
+            ]
+            logger.warning(f"System DEGRADED: {degraded_components}")
+
+            structured_logger.log(
+                LogEventType.HEALTH_CHECK,
+                "TradingEngine",
+                f"System degraded: {degraded_components}",
+                level="WARNING",
+                degraded_components=degraded_components,
+                session_id=self._session_id,
+            )
+
+    def _on_crash_detected(self, crashed_session) -> None:
+        """
+        크래시 감지 콜백
+
+        Args:
+            crashed_session: SessionState 객체
+        """
+        logger.warning(
+            f"Previous crash detected - session: {crashed_session.session_id}, "
+            f"last heartbeat: {crashed_session.last_heartbeat}"
+        )
+
+        structured_logger.log(
+            LogEventType.RECOVERY_START,
+            "TradingEngine",
+            f"Crash recovery initiated for session {crashed_session.session_id}",
+            level="WARNING",
+            crashed_session_id=crashed_session.session_id,
+            active_orders_count=len(crashed_session.active_orders),
+            positions_count=len(crashed_session.positions),
+        )
+
+        # 미처리 주문이 있었으면 동기화 필요
+        if crashed_session.active_orders:
+            logger.info(
+                f"Found {len(crashed_session.active_orders)} unprocessed orders from crashed session"
+            )

@@ -118,6 +118,7 @@ class SessionManager:
     - 토큰 발급 및 저장
     - 만료 8시간 전 자동 갱신
     - API 호출 공통 함수
+    - 재시도 로직 (지수 백오프)
     """
 
     def __init__(self, settings: Settings):
@@ -125,6 +126,7 @@ class SessionManager:
         self._token: Optional[str] = None
         self._token_expires_at: Optional[datetime] = None
         self._last_auth_time: Optional[datetime] = None
+        self._token_valid: bool = False  # 토큰 유효성 플래그
 
         # 기본 헤더
         self._base_headers: Dict[str, str] = {
@@ -142,6 +144,9 @@ class SessionManager:
         self._refresh_thread: Optional[threading.Thread] = None
         self._running = False
         self._lock = threading.Lock()
+
+        # Slack 알림 콜백 (외부에서 설정)
+        self._on_token_refresh_failed: Optional[callable] = None
 
         # 모의/실전 구분
         self._is_paper = settings.mode == TradingMode.PAPER
@@ -218,9 +223,14 @@ class SessionManager:
             self._base_headers["appsecret"] = self._settings.app_secret
 
             self._last_auth_time = datetime.now()
+            self._token_valid = True  # 토큰 유효 플래그 설정
             logger.info(f"Authentication completed. Mode: {self._settings.mode.value}")
 
             return True
+
+    def set_token_refresh_failed_callback(self, callback: callable) -> None:
+        """토큰 갱신 실패 시 호출할 콜백 설정 (예: Slack 알림)"""
+        self._on_token_refresh_failed = callback
 
     def _request_new_token(self) -> bool:
         """신규 토큰 발급 요청"""
@@ -299,23 +309,68 @@ class SessionManager:
                 logger.error(f"Token refresh loop error: {e}")
                 time.sleep(60)
 
-    def _refresh_token(self) -> None:
-        """토큰 갱신"""
-        with self._lock:
-            if self._request_new_token():
-                self._base_headers["authorization"] = f"Bearer {self._token}"
-                logger.info("Token refreshed successfully")
+    def _refresh_token(self, max_retries: int = 3) -> bool:
+        """
+        토큰 갱신 (재시도 로직 포함)
+
+        Args:
+            max_retries: 최대 재시도 횟수
+
+        Returns:
+            갱신 성공 여부
+        """
+        retry_delays = [5, 10, 20]  # 5초, 10초, 20초 후 재시도
+
+        for attempt in range(max_retries + 1):
+            with self._lock:
+                if self._request_new_token():
+                    self._base_headers["authorization"] = f"Bearer {self._token}"
+                    self._token_valid = True
+                    logger.info("Token refreshed successfully")
+                    return True
+
+            # 재시도 필요
+            if attempt < max_retries:
+                delay = retry_delays[attempt] if attempt < len(retry_delays) else retry_delays[-1]
+                logger.warning(
+                    f"Token refresh failed, attempt {attempt + 1}/{max_retries + 1}, "
+                    f"retrying in {delay}s"
+                )
+                time.sleep(delay)
             else:
-                logger.error("Token refresh failed")
+                # 모든 재시도 실패
+                self._token_valid = False
+                logger.error(f"Token refresh failed after {max_retries + 1} attempts")
+
+                # 알림 콜백 호출
+                if self._on_token_refresh_failed:
+                    try:
+                        self._on_token_refresh_failed(
+                            "토큰 갱신 실패",
+                            f"토큰 갱신이 {max_retries + 1}회 시도 후 실패했습니다. "
+                            f"API 호출이 중단될 수 있습니다."
+                        )
+                    except Exception as e:
+                        logger.error(f"Failed to send token refresh failure notification: {e}")
+
+                return False
+
+        return False
 
     @property
     def is_authenticated(self) -> bool:
-        """인증 상태 확인"""
+        """인증 상태 확인 (토큰 존재 + 만료 안됨 + 유효 플래그)"""
         return (
             self._token is not None
             and self._token_expires_at is not None
             and datetime.now() < self._token_expires_at
+            and self._token_valid
         )
+
+    @property
+    def is_token_valid(self) -> bool:
+        """토큰 유효성 플래그 (갱신 실패 시 False)"""
+        return self._token_valid
 
     def smart_sleep(self) -> None:
         """API 호출 간 대기 (Rate Limit 대응)"""
@@ -329,9 +384,10 @@ class SessionManager:
         params: Optional[Dict[str, Any]] = None,
         append_headers: Optional[Dict[str, str]] = None,
         post_flag: bool = False,
+        max_retries: int = 3,
     ) -> APIResp:
         """
-        API 호출 공통 함수
+        API 호출 공통 함수 (재시도 로직 포함)
 
         Args:
             api_url: API URL 경로 (예: "/uapi/domestic-stock/v1/quotations/inquire-price")
@@ -340,6 +396,7 @@ class SessionManager:
             params: 요청 파라미터
             append_headers: 추가 헤더
             post_flag: POST 요청 여부
+            max_retries: 최대 재시도 횟수 (기본: 3)
 
         Returns:
             APIResp 객체
@@ -362,35 +419,98 @@ class SessionManager:
 
         params = params or {}
 
-        try:
-            if post_flag:
-                res = requests.post(
-                    url,
-                    headers=headers,
-                    data=json.dumps(params),
-                    timeout=30,
-                )
-            else:
-                res = requests.get(
-                    url,
-                    headers=headers,
-                    params=params,
-                    timeout=30,
-                )
+        # 재시도 로직 (지수 백오프)
+        base_delay = 1.0  # 초기 대기 시간 (초)
+        max_delay = 10.0  # 최대 대기 시간 (초)
+        last_error: Optional[Exception] = None
+        last_status_code: int = 0
 
-            if res.status_code == 200:
-                return APIResp(res)
-            else:
+        for attempt in range(max_retries + 1):
+            try:
+                if post_flag:
+                    res = requests.post(
+                        url,
+                        headers=headers,
+                        data=json.dumps(params),
+                        timeout=30,
+                    )
+                else:
+                    res = requests.get(
+                        url,
+                        headers=headers,
+                        params=params,
+                        timeout=30,
+                    )
+
+                # 성공
+                if res.status_code == 200:
+                    return APIResp(res)
+
+                # Rate Limit (429) - 재시도
+                if res.status_code == 429:
+                    last_status_code = 429
+                    if attempt < max_retries:
+                        delay = min(base_delay * (2 ** attempt), max_delay)
+                        logger.warning(
+                            f"Rate limit hit (429), attempt {attempt + 1}/{max_retries + 1}, "
+                            f"retrying in {delay:.1f}s - {api_url}"
+                        )
+                        time.sleep(delay)
+                        continue
+                    logger.error(f"Rate limit exceeded after {max_retries + 1} attempts: {api_url}")
+                    return APIRespError(429, "Rate limit exceeded after retries")
+
+                # 서버 에러 (5xx) - 재시도
+                if res.status_code >= 500:
+                    last_status_code = res.status_code
+                    if attempt < max_retries:
+                        delay = min(base_delay * (2 ** attempt), max_delay)
+                        logger.warning(
+                            f"Server error ({res.status_code}), attempt {attempt + 1}/{max_retries + 1}, "
+                            f"retrying in {delay:.1f}s - {api_url}"
+                        )
+                        time.sleep(delay)
+                        continue
+                    logger.error(f"Server error after {max_retries + 1} attempts: {api_url}")
+                    return APIRespError(res.status_code, res.text)
+
+                # 기타 에러 (재시도 안함)
                 logger.error(f"API Error: {res.status_code} - {res.text}")
                 return APIRespError(res.status_code, res.text)
 
-        except requests.exceptions.Timeout:
-            logger.error(f"API Timeout: {url}")
-            return APIRespError(408, "Request Timeout")
+            except requests.exceptions.Timeout:
+                last_error = requests.exceptions.Timeout("Request Timeout")
+                if attempt < max_retries:
+                    delay = min(base_delay * (2 ** attempt), max_delay)
+                    logger.warning(
+                        f"Timeout, attempt {attempt + 1}/{max_retries + 1}, "
+                        f"retrying in {delay:.1f}s - {api_url}"
+                    )
+                    time.sleep(delay)
+                    continue
+                logger.error(f"API Timeout after {max_retries + 1} attempts: {api_url}")
+                return APIRespError(408, "Request Timeout after retries")
 
-        except Exception as e:
-            logger.error(f"API Exception: {e}")
-            return APIRespError(500, str(e))
+            except requests.exceptions.ConnectionError as e:
+                last_error = e
+                if attempt < max_retries:
+                    delay = min(base_delay * (2 ** attempt), max_delay)
+                    logger.warning(
+                        f"Connection error, attempt {attempt + 1}/{max_retries + 1}, "
+                        f"retrying in {delay:.1f}s - {api_url}"
+                    )
+                    time.sleep(delay)
+                    continue
+                logger.error(f"Connection error after {max_retries + 1} attempts: {api_url} - {e}")
+                return APIRespError(503, f"Connection error: {e}")
+
+            except Exception as e:
+                logger.error(f"API Exception: {e}")
+                return APIRespError(500, str(e))
+
+        # 모든 재시도 실패 (이론상 여기 도달하지 않음)
+        logger.error(f"All retries exhausted: {api_url}")
+        return APIRespError(last_status_code or 500, str(last_error) if last_error else "Unknown error")
 
     def get_account_info(self) -> tuple:
         """계좌 정보 반환 (계좌번호, 상품코드)"""
