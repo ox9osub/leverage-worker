@@ -154,12 +154,11 @@ class TradingEngine:
                     f"Recovered from previous crash: session={crashed_session.session_id}, "
                     f"active_orders={len(crashed_session.active_orders)}"
                 )
-                self._slack.send_alert(
-                    title="⚠️ 이전 세션 크래시 감지",
-                    message=f"세션 ID: {crashed_session.session_id}\n"
-                            f"마지막 하트비트: {crashed_session.last_heartbeat}\n"
-                            f"미처리 주문: {len(crashed_session.active_orders)}건",
-                    level="warning",
+                self._slack.send_message(
+                    f"⚠️ 이전 세션 크래시 감지\n"
+                    f"세션 ID: {crashed_session.session_id}\n"
+                    f"마지막 하트비트: {crashed_session.last_heartbeat}\n"
+                    f"미처리 주문: {len(crashed_session.active_orders)}건"
                 )
 
             # 1. 인증
@@ -172,6 +171,10 @@ class TradingEngine:
 
             # 3. 브로커 초기화
             self._broker = KISBroker(self._session)
+
+            # 3-1. 계좌 잔고 조회 및 출력 (API 연결 확인)
+            logger.info("Fetching account balance...")
+            self._print_account_balance()
 
             # 4. 포지션 매니저 초기화
             self._position_manager = PositionManager(self._broker, self._db)
@@ -315,6 +318,46 @@ class TradingEngine:
 
         logger.info(f"Loaded {len(self._strategies)} strategy instances")
 
+    def _print_account_balance(self) -> None:
+        """계좌 잔고 조회 및 출력 (API 연결 확인용)"""
+        try:
+            positions, summary = self._broker.get_balance()
+
+            logger.info("=" * 50)
+            logger.info("📊 Account Balance")
+            logger.info("=" * 50)
+
+            # 계좌 요약
+            if summary:
+                deposit = summary.get("deposit", 0)
+                total_eval = summary.get("total_eval", 0)
+                total_pl = summary.get("total_profit_loss", 0)
+
+                logger.info(f"  Deposit:      {deposit:>15,} KRW")
+                logger.info(f"  Total Eval:   {total_eval:>15,} KRW")
+                logger.info(f"  Total P/L:    {total_pl:>+15,} KRW")
+
+            # 보유 종목
+            if positions:
+                logger.info("-" * 50)
+                logger.info("  Holdings:")
+                for pos in positions:
+                    pl_sign = "+" if pos.profit_loss >= 0 else ""
+                    logger.info(
+                        f"    {pos.stock_name} ({pos.stock_code}): "
+                        f"{pos.quantity}주 @ {pos.avg_price:,.0f} → "
+                        f"{pos.current_price:,} ({pl_sign}{pos.profit_rate:.2f}%)"
+                    )
+            else:
+                logger.info("  No holdings")
+
+            logger.info("=" * 50)
+            logger.info("✅ API connection verified")
+
+        except Exception as e:
+            logger.error(f"Failed to fetch balance: {e}")
+            raise RuntimeError(f"API connection failed: {e}")
+
     def _on_stock_tick(self, stock_code: str, now: datetime) -> None:
         """
         종목 틱 콜백
@@ -331,6 +374,15 @@ class TradingEngine:
             if not price_info:
                 logger.warning(f"Failed to get price: {stock_code}")
                 return
+
+            # 현재가 로그 출력
+            stock_config = self._settings.stocks.get(stock_code)
+            stock_name = stock_config.name if stock_config else stock_code
+            change_sign = "+" if price_info.change >= 0 else ""
+            logger.info(
+                f"[{stock_name}] 현재가: {price_info.current_price:,}원 "
+                f"({change_sign}{price_info.change_rate:.2f}%)"
+            )
 
             # 2. DB 저장 (분봉 upsert)
             minute_key = get_current_minute_key(now)

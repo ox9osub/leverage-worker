@@ -140,18 +140,24 @@ class KISBroker:
             body = res.get_body()
             output = body.output
 
+            # output이 dict인 경우와 객체인 경우 모두 처리
+            def get_value(key: str, default=0):
+                if isinstance(output, dict):
+                    return output.get(key, default)
+                return getattr(output, key, default)
+
             return StockPrice(
                 stock_code=stock_code,
-                stock_name=getattr(output, "hts_kor_isnm", ""),
-                current_price=int(getattr(output, "stck_prpr", 0)),
-                prev_close=int(getattr(output, "stck_sdpr", 0)),
-                change=int(getattr(output, "prdy_vrss", 0)),
-                change_rate=float(getattr(output, "prdy_ctrt", 0)),
-                open_price=int(getattr(output, "stck_oprc", 0)),
-                high_price=int(getattr(output, "stck_hgpr", 0)),
-                low_price=int(getattr(output, "stck_lwpr", 0)),
-                volume=int(getattr(output, "acml_vol", 0)),
-                trade_amount=int(getattr(output, "acml_tr_pbmn", 0)),
+                stock_name=get_value("hts_kor_isnm", ""),
+                current_price=int(get_value("stck_prpr", 0)),
+                prev_close=int(get_value("stck_sdpr", 0)),
+                change=int(get_value("prdy_vrss", 0)),
+                change_rate=float(get_value("prdy_ctrt", 0)),
+                open_price=int(get_value("stck_oprc", 0)),
+                high_price=int(get_value("stck_hgpr", 0)),
+                low_price=int(get_value("stck_lwpr", 0)),
+                volume=int(get_value("acml_vol", 0)),
+                trade_amount=int(get_value("acml_tr_pbmn", 0)),
             )
         except Exception as e:
             logger.error(f"Failed to parse price response: {e}")
@@ -194,31 +200,37 @@ class KISBroker:
         try:
             body = res.get_body()
 
+            # dict/객체 모두 처리하는 헬퍼 함수
+            def get_value(obj, key: str, default=0):
+                if isinstance(obj, dict):
+                    return obj.get(key, default)
+                return getattr(obj, key, default)
+
             # 보유 종목 (output1)
             if hasattr(body, "output1"):
                 for item in body.output1:
-                    qty = int(getattr(item, "hldg_qty", 0))
+                    qty = int(get_value(item, "hldg_qty", 0))
                     if qty <= 0:
                         continue
 
                     positions.append(Position(
-                        stock_code=getattr(item, "pdno", ""),
-                        stock_name=getattr(item, "prdt_name", ""),
+                        stock_code=get_value(item, "pdno", ""),
+                        stock_name=get_value(item, "prdt_name", ""),
                         quantity=qty,
-                        avg_price=float(getattr(item, "pchs_avg_pric", 0)),
-                        current_price=int(getattr(item, "prpr", 0)),
-                        eval_amount=int(getattr(item, "evlu_amt", 0)),
-                        profit_loss=int(getattr(item, "evlu_pfls_amt", 0)),
-                        profit_rate=float(getattr(item, "evlu_pfls_rt", 0)),
+                        avg_price=float(get_value(item, "pchs_avg_pric", 0)),
+                        current_price=int(get_value(item, "prpr", 0)),
+                        eval_amount=int(get_value(item, "evlu_amt", 0)),
+                        profit_loss=int(get_value(item, "evlu_pfls_amt", 0)),
+                        profit_rate=float(get_value(item, "evlu_pfls_rt", 0)),
                     ))
 
             # 계좌 요약 (output2)
             if hasattr(body, "output2") and body.output2:
                 out2 = body.output2[0] if isinstance(body.output2, list) else body.output2
                 summary = {
-                    "total_eval": int(getattr(out2, "tot_evlu_amt", 0)),
-                    "deposit": int(getattr(out2, "dnca_tot_amt", 0)),
-                    "total_profit_loss": int(getattr(out2, "evlu_pfls_smtl_amt", 0)),
+                    "total_eval": int(get_value(out2, "tot_evlu_amt", 0)),
+                    "deposit": int(get_value(out2, "dnca_tot_amt", 0)),
+                    "total_profit_loss": int(get_value(out2, "evlu_pfls_smtl_amt", 0)),
                 }
 
         except Exception as e:

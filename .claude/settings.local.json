@@ -11,7 +11,8 @@
       "Bash(py:*)",
       "Bash(python -c:*)",
       "Bash(python -m py_compile:*)",
-      "Bash(pip install:*)"
+      "Bash(pip install:*)",
+      "Bash(.venv/Scripts/python:*)"
     ],
     "deny": [],
     "ask": []
