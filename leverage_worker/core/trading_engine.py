@@ -383,21 +383,29 @@ class TradingEngine:
                     logger.debug(f"No minute candle data for {stock_code}")
                     continue
 
-                # DB에 저장
+                # DB에 저장 (장중 데이터만)
+                saved_count = 0
                 for data in candle_data:
+                    trade_date = data.get("trade_date", "")
                     time_str = data.get("time", "")
-                    if len(time_str) >= 4:
-                        # HHMMSS -> HH:MM 형식의 minute_key로 변환
-                        minute_key = f"{time_str[:2]}:{time_str[2:4]}"
+                    if len(trade_date) >= 8 and len(time_str) >= 4:
+                        # 장중 시간 필터 (09:00 ~ 15:30)
+                        hour_min = time_str[:4]  # HHMM
+                        if not ("0900" <= hour_min <= "1530"):
+                            continue
+
+                        # YYYYMMDD + HHMMSS -> YYYYMMDD_HHMM 형식으로 변환
+                        minute_key = f"{trade_date}_{hour_min}"
                         self._price_repo.upsert_from_api_response(
                             stock_code=stock_code,
                             current_price=data["close_price"],
                             volume=data["volume"],
                             minute_key=minute_key,
                         )
+                        saved_count += 1
 
                 logger.info(
-                    f"Loaded {len(candle_data)} minute candles for {stock_code}"
+                    f"Loaded {saved_count}/{len(candle_data)} minute candles for {stock_code} (trading hours only)"
                 )
 
             except Exception as e:

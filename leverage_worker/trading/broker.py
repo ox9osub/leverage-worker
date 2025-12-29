@@ -597,27 +597,74 @@ class KISBroker:
                 "FID_ORG_ADJ_PRC": "0",  # 수정주가
             }
 
-            resp: APIResp = self._session.fetch(api_url, tr_id, params=params)
+            logger.info(f"[DEBUG] Daily candles API params: {params}")
+            resp: APIResp = self._session.url_fetch(api_url, tr_id, params=params)
 
-            if not resp.isOK():
-                logger.warning(f"Failed to get daily candles: {stock_code}")
+            # 디버깅: API 응답 상태 확인
+            logger.info(f"[DEBUG] API response ok: {resp.is_ok()}")
+            if not resp.is_ok():
+                error_code = resp.get_error_code()
+                error_msg = resp.get_error_message()
+                logger.warning(
+                    f"Failed to get daily candles: {stock_code}, "
+                    f"error: {error_code} - {error_msg}"
+                )
                 return []
 
-            body = resp.getBody()
-            output2 = getattr(body, "output2", [])
+            body = resp.get_body()
+
+            # 디버깅: 응답 구조 확인
+            if hasattr(body, "_fields"):
+                logger.info(f"[DEBUG] Response body fields: {body._fields}")
+            else:
+                logger.info(f"[DEBUG] Response body type: {type(body)}")
+
+            output2 = getattr(body, "output2", None)
+
+            # output2 검증
+            if output2 is None:
+                logger.warning(f"No output2 in response for {stock_code}")
+                # 다른 필드 확인
+                for attr in ["output", "output1", "output2", "output3"]:
+                    val = getattr(body, attr, "NOT_FOUND")
+                    if val != "NOT_FOUND":
+                        logger.info(f"[DEBUG]   Found {attr}: type={type(val)}, len={len(val) if hasattr(val, '__len__') else 'N/A'}")
+                return []
+
+            if not isinstance(output2, (list, tuple)):
+                logger.warning(f"output2 is not a list: {type(output2)}")
+                return []
+
+            logger.info(f"[DEBUG] output2 length: {len(output2)}")
+
+            # 첫 번째 아이템 구조 확인 (있는 경우)
+            if len(output2) > 0:
+                first_item = output2[0]
+                if hasattr(first_item, "_fields"):
+                    logger.info(f"[DEBUG] First item fields: {first_item._fields}")
+                elif isinstance(first_item, dict):
+                    logger.info(f"[DEBUG] First item keys: {list(first_item.keys())}")
+                else:
+                    logger.info(f"[DEBUG] First item type: {type(first_item)}")
+
+            # dict/object 모두 처리하는 헬퍼 함수
+            def get_value(obj, key: str, default=0):
+                if isinstance(obj, dict):
+                    return obj.get(key, default)
+                return getattr(obj, key, default)
 
             candles = []
             for item in output2:
                 try:
                     candle = {
-                        "trade_date": str(getattr(item, "stck_bsop_date", "")),
-                        "open_price": float(getattr(item, "stck_oprc", 0)),
-                        "high_price": float(getattr(item, "stck_hgpr", 0)),
-                        "low_price": float(getattr(item, "stck_lwpr", 0)),
-                        "close_price": float(getattr(item, "stck_clpr", 0)),
-                        "volume": int(getattr(item, "acml_vol", 0)),
-                        "trade_amount": int(getattr(item, "acml_tr_pbmn", 0)),
-                        "change_rate": float(getattr(item, "prdy_ctrt", 0)),
+                        "trade_date": str(get_value(item, "stck_bsop_date", "")),
+                        "open_price": float(get_value(item, "stck_oprc", 0)),
+                        "high_price": float(get_value(item, "stck_hgpr", 0)),
+                        "low_price": float(get_value(item, "stck_lwpr", 0)),
+                        "close_price": float(get_value(item, "stck_clpr", 0)),
+                        "volume": int(get_value(item, "acml_vol", 0)),
+                        "trade_amount": int(get_value(item, "acml_tr_pbmn", 0)),
+                        "change_rate": float(get_value(item, "prdy_ctrt", 0)),
                     }
                     if candle["close_price"] > 0:  # 유효한 데이터만
                         candles.append(candle)
@@ -662,28 +709,72 @@ class KISBroker:
                 "FID_COND_MRKT_DIV_CODE": "J",
                 "FID_INPUT_ISCD": stock_code,
                 "FID_INPUT_HOUR_1": fid_input_hour,
-                "FID_PW_DATA_INCU_YN": "N",  # 과거 데이터 미포함
+                "FID_PW_DATA_INCU_YN": "Y",  # 과거 데이터 포함
+                "FID_ETC_CLS_CODE": "",  # 기타 구분 코드 (필수)
             }
 
-            resp: APIResp = self._session.fetch(api_url, tr_id, params=params)
+            logger.info(f"[DEBUG] Minute candles API params: {params}")
+            resp: APIResp = self._session.url_fetch(api_url, tr_id, params=params)
 
-            if not resp.isOK():
-                logger.warning(f"Failed to get minute candles: {stock_code}")
+            # 디버깅: API 응답 상태 확인
+            logger.info(f"[DEBUG] API response ok: {resp.is_ok()}")
+            if not resp.is_ok():
+                error_code = resp.get_error_code()
+                error_msg = resp.get_error_message()
+                logger.warning(
+                    f"Failed to get minute candles: {stock_code}, "
+                    f"error: {error_code} - {error_msg}"
+                )
                 return []
 
-            body = resp.getBody()
-            output2 = getattr(body, "output2", [])
+            body = resp.get_body()
+
+            # 디버깅: 응답 구조 확인
+            if hasattr(body, "_fields"):
+                logger.info(f"[DEBUG] Response body fields: {body._fields}")
+            else:
+                logger.info(f"[DEBUG] Response body type: {type(body)}")
+
+            output2 = getattr(body, "output2", None)
+
+            # output2 검증
+            if output2 is None:
+                logger.warning(f"No output2 in minute candles response for {stock_code}")
+                return []
+
+            if not isinstance(output2, (list, tuple)):
+                logger.warning(f"Minute candles output2 is not a list: {type(output2)}")
+                return []
+
+            logger.info(f"[DEBUG] Minute candles output2 length: {len(output2)}")
+
+            # 첫 번째 아이템 구조 확인 (있는 경우)
+            if len(output2) > 0:
+                first_item = output2[0]
+                if hasattr(first_item, "_fields"):
+                    logger.info(f"[DEBUG] Minute first item fields: {first_item._fields}")
+                elif isinstance(first_item, dict):
+                    logger.info(f"[DEBUG] Minute first item keys: {list(first_item.keys())}")
+                else:
+                    logger.info(f"[DEBUG] Minute first item type: {type(first_item)}")
+
+            # dict/object 모두 처리하는 헬퍼 함수
+            def get_value(obj, key: str, default=0):
+                if isinstance(obj, dict):
+                    return obj.get(key, default)
+                return getattr(obj, key, default)
 
             candles = []
             for item in output2:
                 try:
                     candle = {
-                        "time": str(getattr(item, "stck_cntg_hour", "")),
-                        "open_price": int(getattr(item, "stck_oprc", 0)),
-                        "high_price": int(getattr(item, "stck_hgpr", 0)),
-                        "low_price": int(getattr(item, "stck_lwpr", 0)),
-                        "close_price": int(getattr(item, "stck_prpr", 0)),
-                        "volume": int(getattr(item, "cntg_vol", 0)),
+                        "trade_date": str(get_value(item, "stck_bsop_date", "")),
+                        "time": str(get_value(item, "stck_cntg_hour", "")),
+                        "open_price": int(get_value(item, "stck_oprc", 0)),
+                        "high_price": int(get_value(item, "stck_hgpr", 0)),
+                        "low_price": int(get_value(item, "stck_lwpr", 0)),
+                        "close_price": int(get_value(item, "stck_prpr", 0)),
+                        "volume": int(get_value(item, "cntg_vol", 0)),
                     }
                     if candle["close_price"] > 0:
                         candles.append(candle)
