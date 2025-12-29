@@ -99,7 +99,7 @@ class TradingEngine:
         # 11. Health Checker
         self._health_checker = HealthChecker(
             check_interval_seconds=60,
-            on_health_change=self._on_health_change,
+            on_unhealthy_callback=self._on_health_change,
         )
 
         # 12. Recovery Manager

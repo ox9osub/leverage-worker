@@ -10,7 +10,8 @@
       "Bash(dir:*)",
       "Bash(py:*)",
       "Bash(python -c:*)",
-      "Bash(python -m py_compile:*)"
+      "Bash(python -m py_compile:*)",
+      "Bash(pip install:*)"
     ],
     "deny": [],
     "ask": []
