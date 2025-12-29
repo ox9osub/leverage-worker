@@ -208,6 +208,7 @@ class TradingEngine:
 
             # 7. 스케줄러 콜백 설정
             self._scheduler.set_on_stock_tick(self._on_stock_tick)
+            self._scheduler.set_on_check_fills(self._on_check_fills)
             self._scheduler.set_on_market_open(self._on_market_open)
             self._scheduler.set_on_market_close(self._on_market_close)
             self._scheduler.set_on_idle(self._on_idle)
@@ -473,15 +474,23 @@ class TradingEngine:
             logger.error(f"Failed to fetch balance: {e}")
             raise RuntimeError(f"API connection failed: {e}")
 
+    def _on_check_fills(self) -> None:
+        """체결 확인 콜백 (병렬 틱 처리 전 1회 호출)"""
+        try:
+            self._order_manager.check_fills()
+        except Exception as e:
+            logger.error(f"Check fills error: {e}")
+
     def _on_stock_tick(self, stock_code: str, now: datetime) -> None:
         """
         종목 틱 콜백
 
         1. 현재가 조회
         2. DB 저장
-        3. 이전 주문 체결 확인
-        4. 전략별 시그널 생성
-        5. 주문 실행
+        3. 전략별 시그널 생성
+        4. 주문 실행
+
+        Note: 체결 확인은 스케줄러에서 병렬 처리 전 1회 호출
         """
         try:
             # 1. 현재가 조회
@@ -508,14 +517,11 @@ class TradingEngine:
                 minute_key=minute_key,
             )
 
-            # 3. 체결 확인
-            self._order_manager.check_fills()
-
-            # 4. 중복 주문 방지
+            # 3. 중복 주문 방지
             if self._order_manager.has_pending_order(stock_code):
                 return
 
-            # 5. 전략별 시그널 생성
+            # 4. 전략별 시그널 생성
             stock_config = self._settings.stocks.get(stock_code)
             if not stock_config:
                 return

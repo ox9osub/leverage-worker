@@ -9,6 +9,7 @@
 
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from typing import Callable, Dict, List, Optional, Set
 
@@ -46,6 +47,7 @@ class TradingScheduler:
 
         # 콜백
         self._on_stock_tick: Optional[Callable[[str, datetime], None]] = None
+        self._on_check_fills: Optional[Callable[[], None]] = None
         self._on_market_open: Optional[Callable[[], None]] = None
         self._on_market_close: Optional[Callable[[], None]] = None
         self._on_idle: Optional[Callable[[], None]] = None
@@ -66,6 +68,10 @@ class TradingScheduler:
             callback: (stock_code, current_time) -> None
         """
         self._on_stock_tick = callback
+
+    def set_on_check_fills(self, callback: Callable[[], None]) -> None:
+        """체결 확인 콜백 설정 (틱 처리 전 1회 호출)"""
+        self._on_check_fills = callback
 
     def set_on_market_open(self, callback: Callable[[], None]) -> None:
         """장 시작 콜백 설정"""
@@ -158,12 +164,22 @@ class TradingScheduler:
         장중 틱 처리
 
         각 종목별 interval/offset 설정에 따라 콜백 호출 여부 결정
+        종목별 틱은 병렬로 처리하여 API 지연으로 인한 누락 방지
         """
+        # 1. 체결 확인 (병렬 처리 전 1회)
+        if self._on_check_fills:
+            try:
+                self._on_check_fills()
+            except Exception as e:
+                logger.error(f"Check fills error: {e}")
+
+        # 2. 종목별 틱 처리
         if not self._on_stock_tick:
             return
 
+        # 실행할 종목 수집
+        stocks_to_execute = []
         for stock_code, stock_config in self._stocks.items():
-            # 종목별 interval/offset (StockConfig 속성 사용)
             interval = (
                 stock_config.interval_seconds
                 if stock_config.interval_seconds is not None
@@ -175,12 +191,22 @@ class TradingScheduler:
                 else self._schedule.default_offset_seconds
             )
 
-            # 실행 시점인지 확인
             if should_execute_stock(now, interval, offset):
-                try:
-                    self._on_stock_tick(stock_code, now)
-                except Exception as e:
-                    logger.error(f"Stock tick error [{stock_code}]: {e}")
+                stocks_to_execute.append(stock_code)
+
+        # 병렬 실행
+        if stocks_to_execute:
+            with ThreadPoolExecutor(max_workers=len(stocks_to_execute)) as executor:
+                futures = {
+                    executor.submit(self._on_stock_tick, stock_code, now): stock_code
+                    for stock_code in stocks_to_execute
+                }
+                for future in futures:
+                    try:
+                        future.result()
+                    except Exception as e:
+                        stock_code = futures[future]
+                        logger.error(f"Stock tick error [{stock_code}]: {e}")
 
     def _process_idle(self, now: datetime) -> None:
         """장외 대기 처리"""
