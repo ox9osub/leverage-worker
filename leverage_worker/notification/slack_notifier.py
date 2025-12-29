@@ -154,7 +154,7 @@ class SlackNotifier:
                 "type": "header",
                 "text": {
                     "type": "plain_text",
-                    "text": "📈 매수 주문",
+                    "text": "📈 매수 주문 접수",
                     "emoji": True,
                 }
             },
@@ -211,7 +211,7 @@ class SlackNotifier:
                 "type": "header",
                 "text": {
                     "type": "plain_text",
-                    "text": "📉 매도 주문",
+                    "text": "📉 매도 주문 접수",
                     "emoji": True,
                 }
             },
@@ -238,6 +238,126 @@ class SlackNotifier:
                 "type": "context",
                 "elements": [
                     {"type": "mrkdwn", "text": f"💡 {reason}"}
+                ]
+            })
+
+        blocks.append({
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}
+            ]
+        })
+
+        return self.send_message(text, blocks)
+
+    def notify_signal(
+        self,
+        signal_type: str,
+        stock_code: str,
+        stock_name: str,
+        quantity: int,
+        price: int,
+        strategy_name: str,
+        reason: str = "",
+    ) -> bool:
+        """시그널 발생 알림 (매수/매도 시그널)"""
+        is_buy = signal_type.upper() == "BUY"
+        emoji = "🔔" if is_buy else "🔕"
+        signal_text = "매수" if is_buy else "매도"
+
+        text = f"[시그널] {signal_text} - {stock_name}({stock_code}) {quantity}주 @ {price:,}원"
+
+        blocks = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"{emoji} {signal_text} 시그널 발생",
+                    "emoji": True,
+                }
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": f"*종목*\n{stock_name} ({stock_code})"},
+                    {"type": "mrkdwn", "text": f"*수량*\n{quantity}주"},
+                    {"type": "mrkdwn", "text": f"*현재가*\n{price:,}원"},
+                    {"type": "mrkdwn", "text": f"*전략*\n{strategy_name}"},
+                ]
+            },
+        ]
+
+        if reason:
+            blocks.append({
+                "type": "context",
+                "elements": [
+                    {"type": "mrkdwn", "text": f"💡 {reason}"}
+                ]
+            })
+
+        blocks.append({
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}
+            ]
+        })
+
+        return self.send_message(text, blocks)
+
+    def notify_fill(
+        self,
+        fill_type: str,
+        stock_code: str,
+        stock_name: str,
+        quantity: int,
+        price: int,
+        strategy_name: str,
+        profit_loss: int = 0,
+        profit_rate: float = 0.0,
+    ) -> bool:
+        """체결 완료 알림"""
+        is_buy = fill_type.upper() == "BUY"
+        emoji = "✅"
+        fill_text = "매수" if is_buy else "매도"
+
+        if is_buy:
+            text = f"[체결] {fill_text} - {stock_name}({stock_code}) {quantity}주 @ {price:,}원"
+        else:
+            sign = "+" if profit_loss >= 0 else ""
+            text = (
+                f"[체결] {fill_text} - {stock_name}({stock_code}) {quantity}주 @ {price:,}원 "
+                f"({sign}{profit_loss:,}원, {sign}{profit_rate:.2f}%)"
+            )
+
+        blocks = [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": f"{emoji} {fill_text} 체결 완료",
+                    "emoji": True,
+                }
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": f"*종목*\n{stock_name} ({stock_code})"},
+                    {"type": "mrkdwn", "text": f"*수량*\n{quantity}주"},
+                    {"type": "mrkdwn", "text": f"*체결가*\n{price:,}원"},
+                    {"type": "mrkdwn", "text": f"*전략*\n{strategy_name}"},
+                ]
+            },
+        ]
+
+        # 매도 체결 시 손익 정보 추가
+        if not is_buy:
+            pl_emoji = "🟢" if profit_loss >= 0 else "🔴"
+            sign = "+" if profit_loss >= 0 else ""
+            blocks.append({
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": f"*손익*\n{pl_emoji} {sign}{profit_loss:,}원"},
+                    {"type": "mrkdwn", "text": f"*수익률*\n{pl_emoji} {sign}{profit_rate:.2f}%"},
                 ]
             })
 

@@ -36,7 +36,7 @@ from leverage_worker.strategy import (
     TradingSignal,
 )
 from leverage_worker.trading.broker import KISBroker, Position, OrderSide
-from leverage_worker.trading.order_manager import OrderManager
+from leverage_worker.trading.order_manager import ManagedOrder, OrderManager
 from leverage_worker.trading.position_manager import PositionManager
 from leverage_worker.utils.logger import get_logger
 from leverage_worker.utils.log_constants import LogEventType
@@ -197,6 +197,7 @@ class TradingEngine:
                 self._position_manager,
                 self._trading_db,
             )
+            self._order_manager.set_on_fill_callback(self._on_order_fill)
 
             # 5-1. 일봉 데이터 로드 (전략 판단용)
             logger.info("Loading daily candle data...")
@@ -488,6 +489,39 @@ class TradingEngine:
         except Exception as e:
             logger.error(f"Check fills error: {e}")
 
+    def _on_order_fill(self, order: ManagedOrder, filled_qty: int) -> None:
+        """체결 콜백 - 슬랙 알림 전송"""
+        try:
+            # 손익 계산 (매도인 경우)
+            profit_loss = 0
+            profit_rate = 0.0
+
+            if order.side == OrderSide.SELL:
+                position = self._position_manager.get_position(order.stock_code)
+                if position:
+                    profit_loss = int(
+                        (order.filled_price - position.avg_price) * filled_qty
+                    )
+                    if position.avg_price > 0:
+                        profit_rate = (
+                            (order.filled_price - position.avg_price)
+                            / position.avg_price
+                            * 100
+                        )
+
+            self._slack.notify_fill(
+                fill_type=order.side.value,
+                stock_code=order.stock_code,
+                stock_name=order.stock_name,
+                quantity=filled_qty,
+                price=order.filled_price,
+                strategy_name=order.strategy_name or "",
+                profit_loss=profit_loss,
+                profit_rate=profit_rate,
+            )
+        except Exception as e:
+            logger.error(f"Order fill notification error: {e}")
+
     def _on_stock_tick(self, stock_code: str, now: datetime) -> None:
         """
         종목 틱 콜백
@@ -624,6 +658,17 @@ class TradingEngine:
             # 매수 시그널
             strategy.on_entry(context, signal)
 
+            # 시그널 알림 (주문 전)
+            self._slack.notify_signal(
+                signal_type="BUY",
+                stock_code=stock_code,
+                stock_name=stock_name,
+                quantity=signal.quantity,
+                price=context.current_price,
+                strategy_name=strategy.name,
+                reason=signal.reason,
+            )
+
             order_id = self._order_manager.place_buy_order(
                 stock_code=stock_code,
                 stock_name=stock_name,
@@ -644,6 +689,17 @@ class TradingEngine:
         elif signal.is_sell:
             # 매도 시그널
             strategy.on_exit(context, signal)
+
+            # 시그널 알림 (주문 전)
+            self._slack.notify_signal(
+                signal_type="SELL",
+                stock_code=stock_code,
+                stock_name=stock_name,
+                quantity=signal.quantity,
+                price=context.current_price,
+                strategy_name=strategy.name,
+                reason=signal.reason,
+            )
 
             # 손익 계산
             position = context.position
