@@ -8,12 +8,12 @@ ATR 기반 변동성 필터링으로 적절한 진입 시점 포착.
 
 진입 조건:
     1. ATR(14) / 현재가 범위: 0.2% ~ 4% (적정 변동성)
-    2. 현재 종가 > 5봉 전 종가 (상승 추세)
+    2. 현재 종가 > 5일 전 종가 (상승 추세)
 
 청산 조건:
     - 익절: +3.0%
     - 손절: -3.0%
-    - 시간 청산: 8봉 이상 보유
+    - 시간 청산: 8일 이상 보유
 
 백테스트 결과 (133일):
     - 복리 수익률: 5.02%
@@ -80,15 +80,18 @@ class KosdaqMDDTargetStrategy(BaseStrategy):
     코스닥150레버리지 MDD 타겟 전략 (MDD_Target_Business)
 
     파라미터:
-        atr_period: ATR 기간 (기본 14)
+        atr_period: ATR 기간 (기본 14일)
         min_volatility: 최소 변동성 비율 (기본 0.002 = 0.2%)
         max_volatility: 최대 변동성 비율 (기본 0.04 = 4%)
-        trend_period: 추세 확인 기간 (기본 5)
+        trend_period: 추세 확인 기간 (기본 5일)
         take_profit_pct: 익절 비율 (기본 0.03 = 3%)
         stop_loss_pct: 손절 비율 (기본 0.03 = 3%)
-        max_holding_period: 최대 보유 기간 (기본 8)
+        max_holding_days: 최대 보유 기간 (기본 8일)
         position_size: 매수 수량 (기본 1)
     """
+
+    # 최소 필요 일봉 데이터 개수
+    MIN_DATA_REQUIRED = 15  # max(14+1, 5+1)
 
     def __init__(self, name: str, params: Optional[Dict[str, Any]] = None):
         super().__init__(name, params)
@@ -99,10 +102,17 @@ class KosdaqMDDTargetStrategy(BaseStrategy):
         self._trend_period = self.get_param("trend_period", 5)
         self._take_profit_pct = self.get_param("take_profit_pct", 0.03)
         self._stop_loss_pct = self.get_param("stop_loss_pct", 0.03)
-        self._max_holding_period = self.get_param("max_holding_period", 8)
+        self._max_holding_days = self.get_param("max_holding_days", 8)
         self._position_size = self.get_param("position_size", 1)
 
-        self._entry_bar_count = 0
+        self._entry_day_count = 0
+
+    def can_generate_signal(self, context: StrategyContext) -> bool:
+        """일봉 데이터 충분성 확인"""
+        required_days = max(self._atr_period + 1, self._trend_period + 1)
+        if not context.has_sufficient_daily_data(required_days):
+            return False
+        return True
 
     def generate_signal(self, context: StrategyContext) -> TradingSignal:
         """
@@ -110,18 +120,19 @@ class KosdaqMDDTargetStrategy(BaseStrategy):
 
         진입 조건:
             - ATR 비율: 0.2% ~ 4% 범위 (적정 변동성)
-            - 현재 종가 > 5봉 전 종가 (상승 추세)
+            - 현재 종가 > 5일 전 종가 (상승 추세)
 
         청산 조건:
             - 익절: +3.0%
             - 손절: -3.0%
-            - 시간 청산: 8봉 이상 보유
+            - 시간 청산: 8일 이상 보유
         """
         stock_code = context.stock_code
-        required_bars = max(self._atr_period + 1, self._trend_period + 1)
+        required_days = max(self._atr_period + 1, self._trend_period + 1)
 
-        if len(context.price_history) < required_bars:
-            return TradingSignal.hold(stock_code, "Insufficient data")
+        # 일봉 데이터 확인
+        if not context.has_sufficient_daily_data(required_days):
+            return TradingSignal.hold(stock_code, "Insufficient daily data")
 
         # 포지션 보유 시 청산 조건 확인
         if context.has_position:
@@ -129,7 +140,7 @@ class KosdaqMDDTargetStrategy(BaseStrategy):
 
             # 손절
             if profit_rate <= -self._stop_loss_pct:
-                self._entry_bar_count = 0
+                self._entry_day_count = 0
                 return TradingSignal.sell(
                     stock_code=stock_code,
                     quantity=context.position_quantity,
@@ -139,7 +150,7 @@ class KosdaqMDDTargetStrategy(BaseStrategy):
 
             # 익절
             if profit_rate >= self._take_profit_pct:
-                self._entry_bar_count = 0
+                self._entry_day_count = 0
                 return TradingSignal.sell(
                     stock_code=stock_code,
                     quantity=context.position_quantity,
@@ -147,27 +158,27 @@ class KosdaqMDDTargetStrategy(BaseStrategy):
                     confidence=1.0,
                 )
 
-            # 시간 청산
-            self._entry_bar_count += 1
-            if self._entry_bar_count >= self._max_holding_period:
-                self._entry_bar_count = 0
+            # 시간 청산 (일 단위)
+            self._entry_day_count += 1
+            if self._entry_day_count >= self._max_holding_days:
+                self._entry_day_count = 0
                 return TradingSignal.sell(
                     stock_code=stock_code,
                     quantity=context.position_quantity,
-                    reason=f"시간 청산: {self._entry_bar_count}봉 보유",
+                    reason=f"시간 청산: {self._entry_day_count}일 보유",
                     confidence=0.8,
                 )
 
             return TradingSignal.hold(stock_code, "보유 중")
 
-        # 미보유 시 진입 조건 확인
+        # 미보유 시 진입 조건 확인 (일봉 기준)
         current_price = context.current_price
 
-        # 조건 1: ATR 변동성 확인
-        history = context.price_history[-required_bars:]
-        high_prices = [p.high_price for p in history]
-        low_prices = [p.low_price for p in history]
-        close_prices = [p.close_price for p in history]
+        # 조건 1: ATR 변동성 확인 (일봉 기준)
+        daily_candles = context.daily_candles[-required_days:]
+        high_prices = [c.high_price for c in daily_candles]
+        low_prices = [c.low_price for c in daily_candles]
+        close_prices = [c.close_price for c in daily_candles]
 
         atr = calculate_atr(high_prices, low_prices, close_prices, self._atr_period)
         if atr is None:
@@ -176,13 +187,13 @@ class KosdaqMDDTargetStrategy(BaseStrategy):
         atr_ratio = atr / current_price
         has_valid_volatility = self._min_volatility < atr_ratio < self._max_volatility
 
-        # 조건 2: 상승 추세 확인
-        prices = context.get_recent_prices(self._trend_period + 1)
+        # 조건 2: 상승 추세 확인 (일봉 기준)
+        prices = context.get_daily_prices(self._trend_period + 1)
         price_trend_ago = prices[-(self._trend_period + 1)]
         is_uptrend = current_price > price_trend_ago
 
         if has_valid_volatility and is_uptrend:
-            self._entry_bar_count = 0
+            self._entry_day_count = 0
             trend_pct = (current_price - price_trend_ago) / price_trend_ago * 100
             return TradingSignal.buy(
                 stock_code=stock_code,
@@ -197,7 +208,7 @@ class KosdaqMDDTargetStrategy(BaseStrategy):
         logger.info(
             f"[{self.name}] 진입: {context.stock_code} @ {context.current_price:,} - {signal.reason}"
         )
-        self._entry_bar_count = 0
+        self._entry_day_count = 0
 
     def on_exit(self, context: StrategyContext, signal: TradingSignal) -> None:
         logger.info(

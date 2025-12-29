@@ -13,6 +13,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+from leverage_worker.data.daily_candle_repository import DailyCandle
 from leverage_worker.data.minute_candle_repository import MinuteCandle as OHLCV
 from leverage_worker.trading.broker import Position
 
@@ -120,6 +121,9 @@ class StrategyContext:
     # 현재 포지션 (보유 중이면 Position, 아니면 None)
     position: Optional[Position]
 
+    # 일봉 히스토리 (전략 판단용)
+    daily_candles: List[DailyCandle] = field(default_factory=list)
+
     # 오늘 해당 종목의 거래 횟수
     today_trade_count: int = 0
 
@@ -162,11 +166,55 @@ class StrategyContext:
         return [p.volume for p in self.price_history[-count:]]
 
     def get_sma(self, period: int) -> Optional[float]:
-        """단순 이동평균 계산"""
+        """단순 이동평균 계산 (분봉)"""
         prices = self.get_recent_prices(period)
         if len(prices) < period:
             return None
         return sum(prices) / len(prices)
+
+    # --- 일봉 데이터 관련 메서드 ---
+
+    def get_daily_prices(self, count: int = 10) -> List[float]:
+        """최근 N개 일봉 종가 리스트"""
+        return [d.close_price for d in self.daily_candles[-count:]]
+
+    def get_daily_high_prices(self, count: int = 10) -> List[float]:
+        """최근 N개 일봉 고가 리스트"""
+        return [d.high_price for d in self.daily_candles[-count:]]
+
+    def get_daily_low_prices(self, count: int = 10) -> List[float]:
+        """최근 N개 일봉 저가 리스트"""
+        return [d.low_price for d in self.daily_candles[-count:]]
+
+    def get_daily_volumes(self, count: int = 10) -> List[int]:
+        """최근 N개 일봉 거래량 리스트"""
+        return [d.volume for d in self.daily_candles[-count:]]
+
+    def get_daily_sma(self, period: int) -> Optional[float]:
+        """일봉 단순 이동평균 계산"""
+        prices = self.get_daily_prices(period)
+        if len(prices) < period:
+            return None
+        return sum(prices) / len(prices)
+
+    def get_daily_high_n(self, period: int) -> Optional[float]:
+        """최근 N일 최고가 (오늘 제외)"""
+        # 오늘 제외하고 N일치의 고가 중 최대값
+        high_prices = self.get_daily_high_prices(period + 1)[:-1] if len(self.daily_candles) > 0 else []
+        if len(high_prices) < period:
+            return None
+        return max(high_prices)
+
+    def get_daily_low_n(self, period: int) -> Optional[float]:
+        """최근 N일 최저가 (오늘 제외)"""
+        low_prices = self.get_daily_low_prices(period + 1)[:-1] if len(self.daily_candles) > 0 else []
+        if len(low_prices) < period:
+            return None
+        return min(low_prices)
+
+    def has_sufficient_daily_data(self, min_required: int) -> bool:
+        """충분한 일봉 데이터가 있는지 확인"""
+        return len(self.daily_candles) >= min_required
 
     def has_sufficient_data(self, min_required: int) -> bool:
         """

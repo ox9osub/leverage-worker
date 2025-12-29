@@ -7,13 +7,13 @@
 대상: KODEX 레버리지 (122630)
 
 진입 조건:
-    1. 10분(또는 10봉) 전 대비 3% 이상 상승 (모멘텀)
+    1. 10일 전 대비 3% 이상 상승 (모멘텀)
     2. Z-Score > -1.0 (극단적 과매도 아님)
 
 청산 조건:
     - 익절: +3.5%
     - 손절: -2.0%
-    - 시간 청산: 10봉 이상 보유
+    - 시간 청산: 10일 이상 보유
 
 백테스트 결과:
     - 총 수익률: 113.3%
@@ -71,15 +71,18 @@ class HybridMomentumStrategy(BaseStrategy):
     하이브리드 모멘텀 전략 (S_Hybrid_Mom10_MR15_MT3_ZS1.0_TP3)
 
     파라미터:
-        momentum_period: 모멘텀 비교 기간 (기본 10)
+        momentum_period: 모멘텀 비교 기간 (기본 10일)
         momentum_threshold: 모멘텀 임계값 (기본 0.03 = 3%)
-        zscore_period: Z-Score 계산 기간 (기본 15)
+        zscore_period: Z-Score 계산 기간 (기본 15일)
         zscore_threshold: Z-Score 하한 임계값 (기본 -1.0)
         take_profit_pct: 익절 비율 (기본 0.035 = 3.5%)
         stop_loss_pct: 손절 비율 (기본 0.02 = 2%)
-        max_holding_period: 최대 보유 기간 (기본 10)
+        max_holding_days: 최대 보유 기간 (기본 10일)
         position_size: 매수 수량 (기본 1)
     """
+
+    # 최소 필요 일봉 데이터 개수
+    MIN_DATA_REQUIRED = 16  # max(10, 15) + 1
 
     def __init__(self, name: str, params: Optional[Dict[str, Any]] = None):
         super().__init__(name, params)
@@ -90,32 +93,41 @@ class HybridMomentumStrategy(BaseStrategy):
         self._zscore_threshold = self.get_param("zscore_threshold", -1.0)
         self._take_profit_pct = self.get_param("take_profit_pct", 0.035)
         self._stop_loss_pct = self.get_param("stop_loss_pct", 0.02)
-        self._max_holding_period = self.get_param("max_holding_period", 10)
+        self._max_holding_days = self.get_param("max_holding_days", 10)
         self._position_size = self.get_param("position_size", 1)
 
         # 진입 시점 추적 (시간 청산용)
-        self._entry_bar_count = 0
+        self._entry_day_count = 0
+
+    def can_generate_signal(self, context: StrategyContext) -> bool:
+        """일봉 데이터 충분성 확인"""
+        required_days = max(self._momentum_period, self._zscore_period) + 1
+        if not context.has_sufficient_daily_data(required_days):
+            return False
+        return True
 
     def generate_signal(self, context: StrategyContext) -> TradingSignal:
         """
         시그널 생성
 
         진입 조건:
-            - 현재가 > 10봉 전 가격 × 1.03 (모멘텀)
+            - 현재가 > 10일 전 가격 × 1.03 (모멘텀)
             - Z-Score(15) > -1.0 (과매도 아님)
 
         청산 조건:
             - 익절: +3.5%
             - 손절: -2.0%
-            - 시간 청산: 10봉 이상 보유
+            - 시간 청산: 10일 이상 보유
         """
         stock_code = context.stock_code
-        required_bars = max(self._momentum_period, self._zscore_period) + 1
+        required_days = max(self._momentum_period, self._zscore_period) + 1
 
-        if len(context.price_history) < required_bars:
-            return TradingSignal.hold(stock_code, "Insufficient data")
+        # 일봉 데이터 확인
+        if not context.has_sufficient_daily_data(required_days):
+            return TradingSignal.hold(stock_code, "Insufficient daily data")
 
-        prices = context.get_recent_prices(required_bars)
+        # 일봉 종가 가져오기
+        prices = context.get_daily_prices(required_days)
 
         # 포지션 보유 시 청산 조건 확인
         if context.has_position:
@@ -123,7 +135,7 @@ class HybridMomentumStrategy(BaseStrategy):
 
             # 손절 (우선 확인)
             if profit_rate <= -self._stop_loss_pct:
-                self._entry_bar_count = 0
+                self._entry_day_count = 0
                 return TradingSignal.sell(
                     stock_code=stock_code,
                     quantity=context.position_quantity,
@@ -133,7 +145,7 @@ class HybridMomentumStrategy(BaseStrategy):
 
             # 익절
             if profit_rate >= self._take_profit_pct:
-                self._entry_bar_count = 0
+                self._entry_day_count = 0
                 return TradingSignal.sell(
                     stock_code=stock_code,
                     quantity=context.position_quantity,
@@ -141,25 +153,25 @@ class HybridMomentumStrategy(BaseStrategy):
                     confidence=1.0,
                 )
 
-            # 시간 청산
-            self._entry_bar_count += 1
-            if self._entry_bar_count >= self._max_holding_period:
-                self._entry_bar_count = 0
+            # 시간 청산 (일 단위)
+            self._entry_day_count += 1
+            if self._entry_day_count >= self._max_holding_days:
+                self._entry_day_count = 0
                 return TradingSignal.sell(
                     stock_code=stock_code,
                     quantity=context.position_quantity,
-                    reason=f"시간 청산: {self._entry_bar_count}봉 보유",
+                    reason=f"시간 청산: {self._entry_day_count}일 보유",
                     confidence=0.8,
                 )
 
             return TradingSignal.hold(stock_code, "보유 중")
 
-        # 미보유 시 진입 조건 확인
+        # 미보유 시 진입 조건 확인 (일봉 기준)
         current_price = context.current_price
-        price_n_bars_ago = prices[-(self._momentum_period + 1)]
+        price_n_days_ago = prices[-(self._momentum_period + 1)]
 
-        # 조건 1: 모멘텀 확인 (N봉 전 대비 threshold 이상 상승)
-        momentum_target = price_n_bars_ago * (1 + self._momentum_threshold)
+        # 조건 1: 모멘텀 확인 (N일 전 대비 threshold 이상 상승)
+        momentum_target = price_n_days_ago * (1 + self._momentum_threshold)
         has_momentum = current_price > momentum_target
 
         # 조건 2: Z-Score 확인 (과매도 아님)
@@ -171,8 +183,8 @@ class HybridMomentumStrategy(BaseStrategy):
 
         # 진입
         if has_momentum and is_not_oversold:
-            self._entry_bar_count = 0
-            momentum_pct = (current_price - price_n_bars_ago) / price_n_bars_ago * 100
+            self._entry_day_count = 0
+            momentum_pct = (current_price - price_n_days_ago) / price_n_days_ago * 100
             return TradingSignal.buy(
                 stock_code=stock_code,
                 quantity=self._position_size,
@@ -186,7 +198,7 @@ class HybridMomentumStrategy(BaseStrategy):
         logger.info(
             f"[{self.name}] 진입: {context.stock_code} @ {context.current_price:,} - {signal.reason}"
         )
-        self._entry_bar_count = 0
+        self._entry_day_count = 0
 
     def on_exit(self, context: StrategyContext, signal: TradingSignal) -> None:
         logger.info(

@@ -553,3 +553,147 @@ class KISBroker:
         """
         _, summary = self.get_balance()
         return summary.get("deposit", 0)
+
+    def get_daily_candles(
+        self,
+        stock_code: str,
+        start_date: str,
+        end_date: str,
+    ) -> List[Dict[str, Any]]:
+        """
+        일봉 데이터 조회
+
+        Args:
+            stock_code: 종목코드 (6자리)
+            start_date: 조회 시작일 (YYYYMMDD)
+            end_date: 조회 종료일 (YYYYMMDD)
+
+        Returns:
+            일봉 데이터 리스트 (최신순)
+            [
+                {
+                    "trade_date": "20231225",
+                    "open_price": 10000,
+                    "high_price": 10500,
+                    "low_price": 9800,
+                    "close_price": 10200,
+                    "volume": 1000000,
+                    "trade_amount": 10000000000,
+                    "change_rate": 2.0
+                },
+                ...
+            ]
+        """
+        try:
+            api_url = "/uapi/domestic-stock/v1/quotations/inquire-daily-itemchartprice"
+            tr_id = "FHKST03010100"
+
+            params = {
+                "FID_COND_MRKT_DIV_CODE": "J",  # KRX
+                "FID_INPUT_ISCD": stock_code,
+                "FID_INPUT_DATE_1": start_date,
+                "FID_INPUT_DATE_2": end_date,
+                "FID_PERIOD_DIV_CODE": "D",  # 일봉
+                "FID_ORG_ADJ_PRC": "0",  # 수정주가
+            }
+
+            resp: APIResp = self._session.fetch(api_url, tr_id, params=params)
+
+            if not resp.isOK():
+                logger.warning(f"Failed to get daily candles: {stock_code}")
+                return []
+
+            body = resp.getBody()
+            output2 = getattr(body, "output2", [])
+
+            candles = []
+            for item in output2:
+                try:
+                    candle = {
+                        "trade_date": str(getattr(item, "stck_bsop_date", "")),
+                        "open_price": float(getattr(item, "stck_oprc", 0)),
+                        "high_price": float(getattr(item, "stck_hgpr", 0)),
+                        "low_price": float(getattr(item, "stck_lwpr", 0)),
+                        "close_price": float(getattr(item, "stck_clpr", 0)),
+                        "volume": int(getattr(item, "acml_vol", 0)),
+                        "trade_amount": int(getattr(item, "acml_tr_pbmn", 0)),
+                        "change_rate": float(getattr(item, "prdy_ctrt", 0)),
+                    }
+                    if candle["close_price"] > 0:  # 유효한 데이터만
+                        candles.append(candle)
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Failed to parse candle data: {e}")
+                    continue
+
+            logger.info(
+                f"Loaded {len(candles)} daily candles for {stock_code} "
+                f"({start_date} ~ {end_date})"
+            )
+            return candles
+
+        except Exception as e:
+            logger.error(f"Failed to get daily candles for {stock_code}: {e}")
+            return []
+
+    def get_minute_candles(
+        self,
+        stock_code: str,
+        time_unit: str = "1",
+    ) -> List[Dict[str, Any]]:
+        """
+        분봉 데이터 조회 (당일 기준 최근 30개)
+
+        Args:
+            stock_code: 종목코드 (6자리)
+            time_unit: 분봉 단위 (1, 3, 5, 10, 15, 30, 60)
+
+        Returns:
+            분봉 데이터 리스트 (최신순)
+        """
+        try:
+            api_url = "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
+            tr_id = "FHKST03010200"
+
+            # 현재 시간을 기준으로 조회
+            now = datetime.now()
+            fid_input_hour = now.strftime("%H%M%S")
+
+            params = {
+                "FID_COND_MRKT_DIV_CODE": "J",
+                "FID_INPUT_ISCD": stock_code,
+                "FID_INPUT_HOUR_1": fid_input_hour,
+                "FID_PW_DATA_INCU_YN": "N",  # 과거 데이터 미포함
+            }
+
+            resp: APIResp = self._session.fetch(api_url, tr_id, params=params)
+
+            if not resp.isOK():
+                logger.warning(f"Failed to get minute candles: {stock_code}")
+                return []
+
+            body = resp.getBody()
+            output2 = getattr(body, "output2", [])
+
+            candles = []
+            for item in output2:
+                try:
+                    candle = {
+                        "time": str(getattr(item, "stck_cntg_hour", "")),
+                        "open_price": int(getattr(item, "stck_oprc", 0)),
+                        "high_price": int(getattr(item, "stck_hgpr", 0)),
+                        "low_price": int(getattr(item, "stck_lwpr", 0)),
+                        "close_price": int(getattr(item, "stck_prpr", 0)),
+                        "volume": int(getattr(item, "cntg_vol", 0)),
+                    }
+                    if candle["close_price"] > 0:
+                        candles.append(candle)
+                except (ValueError, TypeError) as e:
+                    logger.warning(f"Failed to parse minute candle: {e}")
+                    continue
+
+            logger.info(f"Loaded {len(candles)} minute candles for {stock_code}")
+            return candles
+
+        except Exception as e:
+            logger.error(f"Failed to get minute candles for {stock_code}: {e}")
+            return []

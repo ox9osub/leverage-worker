@@ -24,6 +24,7 @@ from leverage_worker.core.health_checker import (
 from leverage_worker.core.recovery_manager import RecoveryManager
 from leverage_worker.core.scheduler import TradingScheduler
 from leverage_worker.core.session_manager import SessionManager
+from leverage_worker.data.daily_candle_repository import DailyCandle, DailyCandleRepository
 from leverage_worker.data.database import Database
 from leverage_worker.data.minute_candle_repository import MinuteCandleRepository
 from leverage_worker.notification.daily_report import DailyReportGenerator
@@ -67,6 +68,12 @@ class TradingEngine:
 
         # 2. Minute Candle Repository (분봉 데이터)
         self._price_repo = MinuteCandleRepository(self._db)
+
+        # 2-1. Daily Candle Repository (일봉 데이터)
+        self._daily_repo = DailyCandleRepository(self._db)
+
+        # 2-2. 일봉 캐시: stock_code -> List[DailyCandle]
+        self._daily_candles_cache: Dict[str, List[DailyCandle]] = {}
 
         # 3. Session Manager (인증)
         self._session = SessionManager(settings)
@@ -188,6 +195,14 @@ class TradingEngine:
                 self._db,
             )
 
+            # 5-1. 일봉 데이터 로드 (전략 판단용)
+            logger.info("Loading daily candle data...")
+            self._load_daily_candles()
+
+            # 5-2. 분봉 이력 로드 (초기 데이터 확보)
+            logger.info("Loading minute candle history...")
+            self._load_minute_candles()
+
             # 6. 전략 로드
             self._load_strategies()
 
@@ -295,6 +310,98 @@ class TradingEngine:
                 error=str(e),
                 session_id=self._session_id,
             )
+
+    def _load_daily_candles(self) -> None:
+        """
+        시작 시 일봉 데이터 로드
+
+        각 종목에 대해 최근 100일치 일봉 데이터를 API에서 조회하여
+        DB에 저장하고 캐시에 보관
+        """
+        from datetime import timedelta
+
+        today = datetime.now()
+        end_date = today.strftime("%Y%m%d")
+        # 100일 전부터 조회 (주말/공휴일 감안하여 충분히)
+        start_date = (today - timedelta(days=150)).strftime("%Y%m%d")
+
+        for stock_code in self._settings.stocks.keys():
+            try:
+                # API에서 일봉 조회
+                candle_data = self._broker.get_daily_candles(
+                    stock_code=stock_code,
+                    start_date=start_date,
+                    end_date=end_date,
+                )
+
+                if not candle_data:
+                    logger.warning(f"No daily candle data for {stock_code}")
+                    continue
+
+                # DB에 저장
+                daily_candles: List[DailyCandle] = []
+                for data in candle_data:
+                    candle = DailyCandle(
+                        stock_code=stock_code,
+                        trade_date=data["trade_date"],
+                        open_price=data["open_price"],
+                        high_price=data["high_price"],
+                        low_price=data["low_price"],
+                        close_price=data["close_price"],
+                        volume=data["volume"],
+                        trade_amount=data.get("trade_amount"),
+                        change_rate=data.get("change_rate"),
+                    )
+                    daily_candles.append(candle)
+
+                # DB에 배치 저장
+                self._daily_repo.upsert_batch(daily_candles)
+
+                # 캐시에 저장 (날짜순 정렬 - 오래된 것이 앞)
+                daily_candles.sort(key=lambda x: x.trade_date)
+                self._daily_candles_cache[stock_code] = daily_candles
+
+                logger.info(
+                    f"Loaded {len(daily_candles)} daily candles for {stock_code}"
+                )
+
+            except Exception as e:
+                logger.error(f"Failed to load daily candles for {stock_code}: {e}")
+
+    def _load_minute_candles(self) -> None:
+        """
+        시작 시 분봉 이력 로드
+
+        각 종목에 대해 당일 분봉 데이터를 API에서 조회하여 DB에 저장
+        """
+        for stock_code in self._settings.stocks.keys():
+            try:
+                # API에서 분봉 조회
+                candle_data = self._broker.get_minute_candles(stock_code=stock_code)
+
+                if not candle_data:
+                    logger.debug(f"No minute candle data for {stock_code}")
+                    continue
+
+                # DB에 저장
+                for data in candle_data:
+                    time_str = data.get("time", "")
+                    if len(time_str) >= 4:
+                        # HHMMSS -> HH:MM 형식의 minute_key로 변환
+                        minute_key = f"{time_str[:2]}:{time_str[2:4]}"
+                        self._price_repo.upsert_from_api_response(
+                            stock_code=stock_code,
+                            current_price=data["close_price"],
+                            volume=data["volume"],
+                            minute_key=minute_key,
+                        )
+
+                logger.info(
+                    f"Loaded {len(candle_data)} minute candles for {stock_code}"
+                )
+
+            except Exception as e:
+                logger.error(f"Failed to load minute candles for {stock_code}: {e}")
 
     def _load_strategies(self) -> None:
         """전략 인스턴스 로드"""
@@ -411,8 +518,11 @@ class TradingEngine:
                 # 전략 없음 → 가격만 저장
                 return
 
-            # 가격 히스토리 로드
+            # 가격 히스토리 로드 (분봉)
             price_history = self._price_repo.get_recent_prices(stock_code, count=60)
+
+            # 일봉 데이터 로드 (캐시에서)
+            daily_candles = self._daily_candles_cache.get(stock_code, [])
 
             # 현재 포지션
             position = self._position_manager.get_position(stock_code)
@@ -438,6 +548,7 @@ class TradingEngine:
                     current_time=now,
                     price_history=price_history,
                     position=broker_position,
+                    daily_candles=daily_candles,
                     today_trade_count=self._order_manager.get_today_trade_count(stock_code),
                 )
 

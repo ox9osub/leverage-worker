@@ -13,7 +13,7 @@
 청산 조건:
     - 익절: +3.0%
     - 손절: -1.5%
-    - 시간 청산: 10봉 이상 보유
+    - 시간 청산: 10일 이상 보유
 
 백테스트 결과 (133일):
     - 복리 수익률: 16.77%
@@ -69,13 +69,16 @@ class KosdaqBBConservativeStrategy(BaseStrategy):
     코스닥150레버리지 볼린저 밴드 보수적 전략 (BB_Conservative)
 
     파라미터:
-        bb_period: 볼린저 밴드 기간 (기본 25)
+        bb_period: 볼린저 밴드 기간 (기본 25일)
         std_multiplier: 표준편차 배수 (기본 1.5)
         take_profit_pct: 익절 비율 (기본 0.03 = 3%)
         stop_loss_pct: 손절 비율 (기본 0.015 = 1.5%)
-        max_holding_period: 최대 보유 기간 (기본 10)
+        max_holding_days: 최대 보유 기간 (기본 10일)
         position_size: 매수 수량 (기본 1)
     """
+
+    # 최소 필요 일봉 데이터 개수
+    MIN_DATA_REQUIRED = 25
 
     def __init__(self, name: str, params: Optional[Dict[str, Any]] = None):
         super().__init__(name, params)
@@ -84,10 +87,16 @@ class KosdaqBBConservativeStrategy(BaseStrategy):
         self._std_multiplier = self.get_param("std_multiplier", 1.5)
         self._take_profit_pct = self.get_param("take_profit_pct", 0.03)
         self._stop_loss_pct = self.get_param("stop_loss_pct", 0.015)
-        self._max_holding_period = self.get_param("max_holding_period", 10)
+        self._max_holding_days = self.get_param("max_holding_days", 10)
         self._position_size = self.get_param("position_size", 1)
 
-        self._entry_bar_count = 0
+        self._entry_day_count = 0
+
+    def can_generate_signal(self, context: StrategyContext) -> bool:
+        """일봉 데이터 충분성 확인"""
+        if not context.has_sufficient_daily_data(self._bb_period):
+            return False
+        return True
 
     def generate_signal(self, context: StrategyContext) -> TradingSignal:
         """
@@ -99,14 +108,16 @@ class KosdaqBBConservativeStrategy(BaseStrategy):
         청산 조건:
             - 손절: -1.5% (손절 우선)
             - 익절: +3.0%
-            - 시간 청산: 10봉 이상 보유
+            - 시간 청산: 10일 이상 보유
         """
         stock_code = context.stock_code
 
-        if len(context.price_history) < self._bb_period:
-            return TradingSignal.hold(stock_code, "Insufficient data")
+        # 일봉 데이터 확인
+        if not context.has_sufficient_daily_data(self._bb_period):
+            return TradingSignal.hold(stock_code, "Insufficient daily data")
 
-        prices = context.get_recent_prices(self._bb_period)
+        # 일봉 종가로 볼린저 밴드 계산
+        prices = context.get_daily_prices(self._bb_period)
 
         # 포지션 보유 시 청산 조건 확인
         if context.has_position:
@@ -114,7 +125,7 @@ class KosdaqBBConservativeStrategy(BaseStrategy):
 
             # 손절 (우선 확인)
             if profit_rate <= -self._stop_loss_pct:
-                self._entry_bar_count = 0
+                self._entry_day_count = 0
                 return TradingSignal.sell(
                     stock_code=stock_code,
                     quantity=context.position_quantity,
@@ -124,7 +135,7 @@ class KosdaqBBConservativeStrategy(BaseStrategy):
 
             # 익절
             if profit_rate >= self._take_profit_pct:
-                self._entry_bar_count = 0
+                self._entry_day_count = 0
                 return TradingSignal.sell(
                     stock_code=stock_code,
                     quantity=context.position_quantity,
@@ -132,14 +143,14 @@ class KosdaqBBConservativeStrategy(BaseStrategy):
                     confidence=1.0,
                 )
 
-            # 시간 청산
-            self._entry_bar_count += 1
-            if self._entry_bar_count >= self._max_holding_period:
-                self._entry_bar_count = 0
+            # 시간 청산 (일 단위)
+            self._entry_day_count += 1
+            if self._entry_day_count >= self._max_holding_days:
+                self._entry_day_count = 0
                 return TradingSignal.sell(
                     stock_code=stock_code,
                     quantity=context.position_quantity,
-                    reason=f"시간 청산: {self._entry_bar_count}봉 보유",
+                    reason=f"시간 청산: {self._entry_day_count}일 보유",
                     confidence=0.8,
                 )
 
@@ -157,7 +168,7 @@ class KosdaqBBConservativeStrategy(BaseStrategy):
 
         # 진입 조건: 하단 밴드 터치 (과매도)
         if current_price < lower_band:
-            self._entry_bar_count = 0
+            self._entry_day_count = 0
             distance_pct = (lower_band - current_price) / lower_band * 100
             return TradingSignal.buy(
                 stock_code=stock_code,
@@ -172,7 +183,7 @@ class KosdaqBBConservativeStrategy(BaseStrategy):
         logger.info(
             f"[{self.name}] 진입: {context.stock_code} @ {context.current_price:,} - {signal.reason}"
         )
-        self._entry_bar_count = 0
+        self._entry_day_count = 0
 
     def on_exit(self, context: StrategyContext, signal: TradingSignal) -> None:
         logger.info(
