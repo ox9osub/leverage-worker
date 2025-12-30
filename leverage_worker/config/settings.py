@@ -221,6 +221,17 @@ class Settings:
             return stock.strategies
         return []
 
+    def get_strategy_win_rate(
+        self, stock_code: str, strategy_name: str
+    ) -> Optional[float]:
+        """전략의 백테스트 승률 반환"""
+        stock = self._stocks.get(stock_code)
+        if stock:
+            for strategy in stock.strategies:
+                if strategy.get("name") == strategy_name:
+                    return strategy.get("win_rate")
+        return None
+
     def get_server_url(self) -> str:
         """API 서버 URL 반환"""
         if self.mode == TradingMode.LIVE:

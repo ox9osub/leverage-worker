@@ -33,16 +33,19 @@ class SlackNotifier:
         webhook_url: Optional[str] = None,
         token: Optional[str] = None,
         channel: Optional[str] = None,
+        is_paper_mode: bool = False,
     ):
         """
         Args:
             webhook_url: Slack Webhook URL (None이면 token/channel 사용)
             token: Slack Bot Token (xoxb-...)
             channel: Slack Channel ID (C...)
+            is_paper_mode: 모의투자 모드 여부 (True면 메시지에 [모의] 표시)
         """
         self._webhook_url = webhook_url
         self._token = token
         self._channel = channel
+        self._is_paper_mode = is_paper_mode
 
         # 우선순위: token+channel > webhook_url
         self._use_token = token is not None and channel is not None
@@ -50,13 +53,18 @@ class SlackNotifier:
 
         if self._enabled:
             method = "Bot Token" if self._use_token else "Webhook"
-            logger.info(f"SlackNotifier enabled ({method})")
+            mode_str = "모의투자" if is_paper_mode else "실전투자"
+            logger.info(f"SlackNotifier enabled ({method}, {mode_str})")
         else:
             logger.info("SlackNotifier disabled (no credentials)")
 
     @property
     def is_enabled(self) -> bool:
         return self._enabled
+
+    def _get_mode_prefix(self) -> str:
+        """모의투자 모드면 [모의] prefix 반환"""
+        return "[모의] " if self._is_paper_mode else ""
 
     def send_message(self, text: str, blocks: Optional[List[Dict]] = None) -> bool:
         """
@@ -145,46 +153,25 @@ class SlackNotifier:
         price: int,
         strategy_name: str,
         reason: str = "",
+        strategy_win_rate: Optional[float] = None,
     ) -> bool:
-        """매수 알림"""
-        text = f"[매수] {stock_name}({stock_code}) {quantity}주 @ {price:,}원"
+        """매수 주문 접수 알림"""
+        total_amount = quantity * price
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        blocks = [
-            {
-                "type": "header",
-                "text": {
-                    "type": "plain_text",
-                    "text": "📈 매수 주문 접수",
-                    "emoji": True,
-                }
-            },
-            {
-                "type": "section",
-                "fields": [
-                    {"type": "mrkdwn", "text": f"*종목*\n{stock_name} ({stock_code})"},
-                    {"type": "mrkdwn", "text": f"*수량*\n{quantity}주"},
-                    {"type": "mrkdwn", "text": f"*가격*\n{price:,}원"},
-                    {"type": "mrkdwn", "text": f"*전략*\n{strategy_name}"},
-                ]
-            },
+        # 전략명에 승률 포함
+        strategy_display = strategy_name
+        if strategy_win_rate is not None:
+            strategy_display = f"{strategy_name}({strategy_win_rate:.1f}%)"
+
+        lines = [
+            f"{self._get_mode_prefix()}[매수주문]",
+            f"{stock_name}({stock_code}) / {quantity}주 / {price:,}원 / {total_amount:,}원",
+            f"전략: {strategy_display}" + (f" / {reason}" if reason else ""),
+            timestamp,
         ]
 
-        if reason:
-            blocks.append({
-                "type": "context",
-                "elements": [
-                    {"type": "mrkdwn", "text": f"💡 {reason}"}
-                ]
-            })
-
-        blocks.append({
-            "type": "context",
-            "elements": [
-                {"type": "mrkdwn", "text": f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}
-            ]
-        })
-
-        return self.send_message(text, blocks)
+        return self.send_message("\n".join(lines))
 
     def notify_sell(
         self,
@@ -196,59 +183,27 @@ class SlackNotifier:
         profit_rate: float,
         strategy_name: str,
         reason: str = "",
+        strategy_win_rate: Optional[float] = None,
     ) -> bool:
-        """매도 알림"""
-        emoji = "🟢" if profit_loss >= 0 else "🔴"
+        """매도 주문 접수 알림"""
+        total_amount = quantity * price
         sign = "+" if profit_loss >= 0 else ""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        text = (
-            f"[매도] {stock_name}({stock_code}) {quantity}주 @ {price:,}원 "
-            f"({sign}{profit_loss:,}원, {sign}{profit_rate:.2f}%)"
-        )
+        # 전략명에 승률 포함
+        strategy_display = strategy_name
+        if strategy_win_rate is not None:
+            strategy_display = f"{strategy_name}({strategy_win_rate:.1f}%)"
 
-        blocks = [
-            {
-                "type": "header",
-                "text": {
-                    "type": "plain_text",
-                    "text": "📉 매도 주문 접수",
-                    "emoji": True,
-                }
-            },
-            {
-                "type": "section",
-                "fields": [
-                    {"type": "mrkdwn", "text": f"*종목*\n{stock_name} ({stock_code})"},
-                    {"type": "mrkdwn", "text": f"*수량*\n{quantity}주"},
-                    {"type": "mrkdwn", "text": f"*가격*\n{price:,}원"},
-                    {"type": "mrkdwn", "text": f"*전략*\n{strategy_name}"},
-                ]
-            },
-            {
-                "type": "section",
-                "fields": [
-                    {"type": "mrkdwn", "text": f"*손익*\n{emoji} {sign}{profit_loss:,}원"},
-                    {"type": "mrkdwn", "text": f"*수익률*\n{emoji} {sign}{profit_rate:.2f}%"},
-                ]
-            },
+        lines = [
+            f"{self._get_mode_prefix()}[매도주문]",
+            f"{stock_name}({stock_code}) / {quantity}주 / {price:,}원 / {total_amount:,}원",
+            f"손익: {sign}{profit_loss:,}원 ({sign}{profit_rate:.2f}%)",
+            f"전략: {strategy_display}" + (f" / {reason}" if reason else ""),
+            timestamp,
         ]
 
-        if reason:
-            blocks.append({
-                "type": "context",
-                "elements": [
-                    {"type": "mrkdwn", "text": f"💡 {reason}"}
-                ]
-            })
-
-        blocks.append({
-            "type": "context",
-            "elements": [
-                {"type": "mrkdwn", "text": f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}
-            ]
-        })
-
-        return self.send_message(text, blocks)
+        return self.send_message("\n".join(lines))
 
     def notify_signal(
         self,
@@ -259,50 +214,27 @@ class SlackNotifier:
         price: int,
         strategy_name: str,
         reason: str = "",
+        strategy_win_rate: Optional[float] = None,
     ) -> bool:
         """시그널 발생 알림 (매수/매도 시그널)"""
         is_buy = signal_type.upper() == "BUY"
-        emoji = "🔔" if is_buy else "🔕"
-        signal_text = "매수" if is_buy else "매도"
+        signal_text = "매수시그널" if is_buy else "매도시그널"
+        total_amount = quantity * price
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        text = f"[시그널] {signal_text} - {stock_name}({stock_code}) {quantity}주 @ {price:,}원"
+        # 전략명에 승률 포함
+        strategy_display = strategy_name
+        if strategy_win_rate is not None:
+            strategy_display = f"{strategy_name}({strategy_win_rate:.1f}%)"
 
-        blocks = [
-            {
-                "type": "header",
-                "text": {
-                    "type": "plain_text",
-                    "text": f"{emoji} {signal_text} 시그널 발생",
-                    "emoji": True,
-                }
-            },
-            {
-                "type": "section",
-                "fields": [
-                    {"type": "mrkdwn", "text": f"*종목*\n{stock_name} ({stock_code})"},
-                    {"type": "mrkdwn", "text": f"*수량*\n{quantity}주"},
-                    {"type": "mrkdwn", "text": f"*현재가*\n{price:,}원"},
-                    {"type": "mrkdwn", "text": f"*전략*\n{strategy_name}"},
-                ]
-            },
+        lines = [
+            f"{self._get_mode_prefix()}[{signal_text}]",
+            f"{stock_name}({stock_code}) / {quantity}주 / {price:,}원 / {total_amount:,}원",
+            f"전략: {strategy_display}" + (f" / {reason}" if reason else ""),
+            timestamp,
         ]
 
-        if reason:
-            blocks.append({
-                "type": "context",
-                "elements": [
-                    {"type": "mrkdwn", "text": f"💡 {reason}"}
-                ]
-            })
-
-        blocks.append({
-            "type": "context",
-            "elements": [
-                {"type": "mrkdwn", "text": f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}
-            ]
-        })
-
-        return self.send_message(text, blocks)
+        return self.send_message("\n".join(lines))
 
     def notify_fill(
         self,
@@ -314,151 +246,70 @@ class SlackNotifier:
         strategy_name: str,
         profit_loss: int = 0,
         profit_rate: float = 0.0,
+        strategy_win_rate: Optional[float] = None,
     ) -> bool:
         """체결 완료 알림"""
         is_buy = fill_type.upper() == "BUY"
-        emoji = "✅"
-        fill_text = "매수" if is_buy else "매도"
+        fill_text = "매수체결" if is_buy else "매도체결"
+        total_amount = quantity * price
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        if is_buy:
-            text = f"[체결] {fill_text} - {stock_name}({stock_code}) {quantity}주 @ {price:,}원"
-        else:
-            sign = "+" if profit_loss >= 0 else ""
-            text = (
-                f"[체결] {fill_text} - {stock_name}({stock_code}) {quantity}주 @ {price:,}원 "
-                f"({sign}{profit_loss:,}원, {sign}{profit_rate:.2f}%)"
-            )
+        # 전략명에 승률 포함
+        strategy_display = strategy_name
+        if strategy_win_rate is not None:
+            strategy_display = f"{strategy_name}({strategy_win_rate:.1f}%)"
 
-        blocks = [
-            {
-                "type": "header",
-                "text": {
-                    "type": "plain_text",
-                    "text": f"{emoji} {fill_text} 체결 완료",
-                    "emoji": True,
-                }
-            },
-            {
-                "type": "section",
-                "fields": [
-                    {"type": "mrkdwn", "text": f"*종목*\n{stock_name} ({stock_code})"},
-                    {"type": "mrkdwn", "text": f"*수량*\n{quantity}주"},
-                    {"type": "mrkdwn", "text": f"*체결가*\n{price:,}원"},
-                    {"type": "mrkdwn", "text": f"*전략*\n{strategy_name}"},
-                ]
-            },
+        lines = [
+            f"{self._get_mode_prefix()}[{fill_text}]",
+            f"{stock_name}({stock_code}) / {quantity}주 / {price:,}원 / {total_amount:,}원",
         ]
 
         # 매도 체결 시 손익 정보 추가
         if not is_buy:
-            pl_emoji = "🟢" if profit_loss >= 0 else "🔴"
             sign = "+" if profit_loss >= 0 else ""
-            blocks.append({
-                "type": "section",
-                "fields": [
-                    {"type": "mrkdwn", "text": f"*손익*\n{pl_emoji} {sign}{profit_loss:,}원"},
-                    {"type": "mrkdwn", "text": f"*수익률*\n{pl_emoji} {sign}{profit_rate:.2f}%"},
-                ]
-            })
+            lines.append(f"손익: {sign}{profit_loss:,}원 ({sign}{profit_rate:.2f}%)")
 
-        blocks.append({
-            "type": "context",
-            "elements": [
-                {"type": "mrkdwn", "text": f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}
-            ]
-        })
+        lines.append(f"전략: {strategy_display}")
+        lines.append(timestamp)
 
-        return self.send_message(text, blocks)
+        return self.send_message("\n".join(lines))
 
     def notify_error(self, title: str, message: str) -> bool:
         """오류 알림"""
-        text = f"[오류] {title}: {message}"
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        blocks = [
-            {
-                "type": "header",
-                "text": {
-                    "type": "plain_text",
-                    "text": "⚠️ 오류 발생",
-                    "emoji": True,
-                }
-            },
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*{title}*\n```{message}```",
-                }
-            },
-            {
-                "type": "context",
-                "elements": [
-                    {"type": "mrkdwn", "text": f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}
-                ]
-            },
+        lines = [
+            f"{self._get_mode_prefix()}[오류]",
+            f"{title}",
+            message,
+            timestamp,
         ]
 
-        return self.send_message(text, blocks)
+        return self.send_message("\n".join(lines))
 
     def notify_start(self, mode: str, stocks_count: int) -> bool:
         """프로그램 시작 알림"""
-        text = f"[시작] 자동매매 시작 (모드: {mode}, 종목: {stocks_count}개)"
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        blocks = [
-            {
-                "type": "header",
-                "text": {
-                    "type": "plain_text",
-                    "text": "🚀 자동매매 시작",
-                    "emoji": True,
-                }
-            },
-            {
-                "type": "section",
-                "fields": [
-                    {"type": "mrkdwn", "text": f"*모드*\n{mode}"},
-                    {"type": "mrkdwn", "text": f"*관리 종목*\n{stocks_count}개"},
-                ]
-            },
-            {
-                "type": "context",
-                "elements": [
-                    {"type": "mrkdwn", "text": f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}
-                ]
-            },
+        lines = [
+            f"{self._get_mode_prefix()}[시작]",
+            f"자동매매 시작 / 모드: {mode} / 관리종목: {stocks_count}개",
+            timestamp,
         ]
 
-        return self.send_message(text, blocks)
+        return self.send_message("\n".join(lines))
 
     def notify_stop(self, reason: str = "정상 종료") -> bool:
         """프로그램 종료 알림"""
-        text = f"[종료] 자동매매 종료 ({reason})"
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        blocks = [
-            {
-                "type": "header",
-                "text": {
-                    "type": "plain_text",
-                    "text": "🛑 자동매매 종료",
-                    "emoji": True,
-                }
-            },
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"*사유*: {reason}",
-                }
-            },
-            {
-                "type": "context",
-                "elements": [
-                    {"type": "mrkdwn", "text": f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}
-                ]
-            },
+        lines = [
+            f"{self._get_mode_prefix()}[종료]",
+            f"자동매매 종료 / 사유: {reason}",
+            timestamp,
         ]
 
-        return self.send_message(text, blocks)
+        return self.send_message("\n".join(lines))
 
     def send_daily_report(self, report: Dict[str, Any]) -> bool:
         """
@@ -482,63 +333,29 @@ class SlackNotifier:
         if sell_trades > 0:
             win_rate = (win_trades / sell_trades) * 100
 
-        pnl_emoji = "🟢" if realized_pnl >= 0 else "🔴"
         pnl_sign = "+" if realized_pnl >= 0 else ""
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        text = f"[일일리포트] {date} - 거래 {total_trades}건, 손익 {pnl_sign}{realized_pnl:,}원"
-
-        blocks = [
-            {
-                "type": "header",
-                "text": {
-                    "type": "plain_text",
-                    "text": f"📊 일일 거래 리포트 ({date})",
-                    "emoji": True,
-                }
-            },
-            {"type": "divider"},
-            {
-                "type": "section",
-                "fields": [
-                    {"type": "mrkdwn", "text": f"*총 거래*\n{total_trades}건"},
-                    {"type": "mrkdwn", "text": f"*매수/매도*\n{buy_trades}/{sell_trades}건"},
-                ]
-            },
-            {
-                "type": "section",
-                "fields": [
-                    {"type": "mrkdwn", "text": f"*실현손익*\n{pnl_emoji} {pnl_sign}{realized_pnl:,}원"},
-                    {"type": "mrkdwn", "text": f"*승률*\n{win_rate:.1f}% ({win_trades}승 {lose_trades}패)"},
-                ]
-            },
+        lines = [
+            f"{self._get_mode_prefix()}[일일리포트] {date}",
+            f"총거래: {total_trades}건 (매수 {buy_trades} / 매도 {sell_trades})",
+            f"실현손익: {pnl_sign}{realized_pnl:,}원",
+            f"승률: {win_rate:.1f}% ({win_trades}승 {lose_trades}패)",
         ]
 
         # 개별 거래 내역 (있으면)
         trades = report.get("trades", [])
         if trades:
-            blocks.append({"type": "divider"})
-
-            trade_text = "*거래 내역*\n"
+            lines.append("---")
             for t in trades[:10]:  # 최대 10건
-                emoji = "🟢" if t.get("profit_loss", 0) >= 0 else "🔴"
-                trade_text += (
-                    f"{emoji} {t['stock_name']} {t['side']} "
-                    f"{t['quantity']}주 @ {t['price']:,}원\n"
+                sign = "+" if t.get("profit_loss", 0) >= 0 else ""
+                lines.append(
+                    f"{t['stock_name']} {t['side']} {t['quantity']}주 @ {t['price']:,}원"
                 )
 
             if len(trades) > 10:
-                trade_text += f"... 외 {len(trades) - 10}건\n"
+                lines.append(f"... 외 {len(trades) - 10}건")
 
-            blocks.append({
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": trade_text}
-            })
+        lines.append(timestamp)
 
-        blocks.append({
-            "type": "context",
-            "elements": [
-                {"type": "mrkdwn", "text": f"⏰ 생성: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"}
-            ]
-        })
-
-        return self.send_message(text, blocks)
+        return self.send_message("\n".join(lines))

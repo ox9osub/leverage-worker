@@ -98,6 +98,7 @@ class TradingEngine:
             webhook_url=settings.notification.slack_webhook_url,
             token=settings.notification.slack_token,
             channel=settings.notification.slack_channel,
+            is_paper_mode=settings.is_paper_trading(),
         )
 
         # 9. Daily Report Generator (매매 DB 사용)
@@ -509,6 +510,13 @@ class TradingEngine:
                             * 100
                         )
 
+            # 전략 승률 가져오기
+            win_rate = None
+            if order.strategy_name:
+                win_rate = self._settings.get_strategy_win_rate(
+                    order.stock_code, order.strategy_name
+                )
+
             self._slack.notify_fill(
                 fill_type=order.side.value,
                 stock_code=order.stock_code,
@@ -518,6 +526,7 @@ class TradingEngine:
                 strategy_name=order.strategy_name or "",
                 profit_loss=profit_loss,
                 profit_rate=profit_rate,
+                strategy_win_rate=win_rate,
             )
         except Exception as e:
             logger.error(f"Order fill notification error: {e}")
@@ -658,6 +667,9 @@ class TradingEngine:
             # 매수 시그널
             strategy.on_entry(context, signal)
 
+            # 전략 승률 가져오기
+            win_rate = self._settings.get_strategy_win_rate(stock_code, strategy.name)
+
             # 시그널 알림 (주문 전)
             self._slack.notify_signal(
                 signal_type="BUY",
@@ -667,6 +679,7 @@ class TradingEngine:
                 price=context.current_price,
                 strategy_name=strategy.name,
                 reason=signal.reason,
+                strategy_win_rate=win_rate,
             )
 
             order_id = self._order_manager.place_buy_order(
@@ -684,11 +697,15 @@ class TradingEngine:
                     price=context.current_price,
                     strategy_name=strategy.name,
                     reason=signal.reason,
+                    strategy_win_rate=win_rate,
                 )
 
         elif signal.is_sell:
             # 매도 시그널
             strategy.on_exit(context, signal)
+
+            # 전략 승률 가져오기
+            win_rate = self._settings.get_strategy_win_rate(stock_code, strategy.name)
 
             # 시그널 알림 (주문 전)
             self._slack.notify_signal(
@@ -699,6 +716,7 @@ class TradingEngine:
                 price=context.current_price,
                 strategy_name=strategy.name,
                 reason=signal.reason,
+                strategy_win_rate=win_rate,
             )
 
             # 손익 계산
@@ -729,6 +747,7 @@ class TradingEngine:
                     profit_rate=profit_rate,
                     strategy_name=strategy.name,
                     reason=signal.reason,
+                    strategy_win_rate=win_rate,
                 )
 
     def _on_market_open(self) -> None:
