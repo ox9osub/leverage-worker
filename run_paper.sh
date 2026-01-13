@@ -1,0 +1,1 @@
+python leverage_worker/main.py --mode paper

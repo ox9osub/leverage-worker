@@ -40,6 +40,9 @@ from leverage_worker.strategy.strategies.kosdaq_bb_conservative import (
 from leverage_worker.strategy.strategies.kosdaq_donchian import KosdaqDonchianStrategy
 from leverage_worker.strategy.strategies.kosdaq_mdd_target import KosdaqMDDTargetStrategy
 
+# WebSocket 실시간 전략
+from leverage_worker.strategy.strategies.dip_buy import DipBuyStrategy
+
 
 __all__ = [
     # 기본 예시 전략
@@ -55,4 +58,6 @@ __all__ = [
     "KosdaqBBConservativeStrategy",
     "KosdaqDonchianStrategy",
     "KosdaqMDDTargetStrategy",
+    # WebSocket 실시간 전략
+    "DipBuyStrategy",
 ]

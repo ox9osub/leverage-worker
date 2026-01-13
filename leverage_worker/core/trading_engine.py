@@ -9,9 +9,10 @@
 
 import signal
 import sys
+import threading
 import uuid
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from leverage_worker.config.settings import Settings, TradingMode
 from leverage_worker.core.emergency import EmergencyStop, create_emergency_stop_handler
@@ -42,6 +43,7 @@ from leverage_worker.utils.logger import get_logger
 from leverage_worker.utils.log_constants import LogEventType
 from leverage_worker.utils.structured_logger import get_structured_logger
 from leverage_worker.utils.time_utils import get_current_minute_key
+from leverage_worker.websocket import RealtimeWSClient, TickData
 
 logger = get_logger(__name__)
 structured_logger = get_structured_logger()
@@ -122,6 +124,13 @@ class TradingEngine:
         self._emergency_stop = EmergencyStop(
             check_interval_seconds=5,
         )
+
+        # 14. WebSocket 클라이언트 (실시간 전략용)
+        self._ws_client: Optional[RealtimeWSClient] = None
+        self._ws_stock_codes: Set[str] = set()  # WebSocket 구독 종목
+
+        # 15. 동시성 제어 (스케줄러/WebSocket 공유 리소스 보호)
+        self._tick_lock = threading.Lock()
 
         # 세션 ID
         self._session_id = str(uuid.uuid4())[:8]
@@ -224,6 +233,9 @@ class TradingEngine:
                 stocks_count=len(self._settings.stocks),
             )
 
+            # 8-1. WebSocket 시작 (실시간 전략용)
+            self._start_websocket()
+
             # 9. 스케줄러 시작
             self._running = True
             self._scheduler.start()
@@ -292,6 +304,11 @@ class TradingEngine:
             # 3. 스케줄러 중지
             self._scheduler.stop()
 
+            # 3-1. WebSocket 중지
+            if self._ws_client:
+                self._ws_client.stop()
+                logger.info("WebSocket client stopped")
+
             # 4. 미체결 주문 취소
             if self._order_manager:
                 cancelled = self._order_manager.cancel_all_pending()
@@ -307,7 +324,10 @@ class TradingEngine:
             self._market_db.close_all()
             self._trading_db.close_all()
 
-            # 8. Slack 종료 알림
+            # 8. 시그널 요약 전송
+            self._slack.send_signal_summary()
+
+            # 9. Slack 종료 알림
             self._slack.notify_stop()
 
             logger.info("TradingEngine stopped")
@@ -531,9 +551,145 @@ class TradingEngine:
         except Exception as e:
             logger.error(f"Order fill notification error: {e}")
 
+    # ===== WebSocket 관련 메서드 =====
+
+    def _start_websocket(self) -> None:
+        """WebSocket 연결 시작 (별도 스레드)"""
+        ws_stock_codes = self._get_ws_strategy_stocks()
+        if not ws_stock_codes:
+            logger.info("No WebSocket strategies configured, skipping WebSocket")
+            return
+
+        self._ws_stock_codes = ws_stock_codes
+        self._ws_client = RealtimeWSClient(
+            on_tick=self._on_ws_tick,
+            on_error=self._on_ws_error,
+        )
+        self._ws_client.start(list(ws_stock_codes))
+        logger.info(f"WebSocket started for {len(ws_stock_codes)} stocks: {ws_stock_codes}")
+
+    def _get_ws_strategy_stocks(self) -> Set[str]:
+        """WebSocket 전략이 설정된 종목 목록 조회"""
+        ws_stocks = set()
+        for stock_code, stock_config in self._settings.stocks.items():
+            for strategy_config in stock_config.strategies:
+                # execution_mode가 "websocket"인 전략 찾기
+                if strategy_config.get("execution_mode") == "websocket":
+                    ws_stocks.add(stock_code)
+                    break
+        return ws_stocks
+
+    def _on_ws_error(self, error: Exception) -> None:
+        """WebSocket 에러 콜백"""
+        logger.error(f"WebSocket error: {error}")
+        self._slack.notify_error("WebSocket 에러", str(error))
+
+    def _on_ws_tick(self, tick_data: TickData) -> None:
+        """
+        WebSocket 체결 데이터 콜백
+
+        실시간 전략(execution_mode="websocket")만 실행
+        기존 _on_stock_tick과 유사하지만:
+        - REST API 대신 WebSocket 데이터 사용
+        - WebSocket 전략만 실행
+        """
+        with self._tick_lock:
+            try:
+                stock_code = tick_data.stock_code
+                now = tick_data.timestamp
+
+                # WebSocket 전략 종목 확인
+                if stock_code not in self._ws_stock_codes:
+                    return
+
+                stock_config = self._settings.stocks.get(stock_code)
+                if not stock_config:
+                    return
+
+                # 현재가 로그
+                stock_name = stock_config.name
+                change_sign = "+" if tick_data.change >= 0 else ""
+                logger.debug(
+                    f"[WS][{stock_name}] 체결: {tick_data.price:,}원 "
+                    f"({change_sign}{tick_data.change_rate:.2f}%)"
+                )
+
+                # DB 저장 (분봉 upsert)
+                minute_key = get_current_minute_key(now)
+                self._price_repo.upsert_from_api_response(
+                    stock_code=stock_code,
+                    current_price=tick_data.price,
+                    volume=tick_data.accumulated_volume,
+                    minute_key=minute_key,
+                )
+
+                # 중복 주문 방지
+                if self._order_manager.has_pending_order(stock_code):
+                    return
+
+                # WebSocket 전략만 실행
+                strategies = stock_config.strategies
+                if not strategies:
+                    return
+
+                # 가격 히스토리 로드 (분봉)
+                price_history = self._price_repo.get_recent_prices(stock_code, count=60)
+
+                # 일봉 데이터 로드 (캐시에서)
+                daily_candles = self._daily_candles_cache.get(stock_code, [])
+
+                # 현재 포지션
+                position = self._position_manager.get_position(stock_code)
+                broker_position = self._get_broker_position(stock_code)
+
+                for strategy_config in strategies:
+                    # WebSocket 전략만 실행
+                    if strategy_config.get("execution_mode") != "websocket":
+                        continue
+
+                    strategy_name = strategy_config.get("name")
+                    key = (stock_code, strategy_name)
+                    strategy = self._strategies.get(key)
+
+                    if not strategy:
+                        continue
+
+                    # 포지션 보유 시 해당 전략으로만 매도 가능
+                    if position and position.strategy_name != strategy_name:
+                        continue
+
+                    # 전략 컨텍스트 생성
+                    context = StrategyContext(
+                        stock_code=stock_code,
+                        stock_name=stock_config.name,
+                        current_price=tick_data.price,
+                        current_time=now,
+                        price_history=price_history,
+                        position=broker_position,
+                        daily_candles=daily_candles,
+                        today_trade_count=self._order_manager.get_today_trade_count(
+                            stock_code
+                        ),
+                    )
+
+                    # 시그널 생성 가능 여부 확인
+                    if not strategy.can_generate_signal(context):
+                        continue
+
+                    # 시그널 생성
+                    signal = strategy.generate_signal(context)
+
+                    # 시그널 처리
+                    self._process_signal(signal, context, strategy)
+
+            except Exception as e:
+                logger.error(f"WebSocket tick error [{tick_data.stock_code}]: {e}")
+
+    # ===== 스케줄러 기반 메서드 =====
+
     def _on_stock_tick(self, stock_code: str, now: datetime) -> None:
         """
-        종목 틱 콜백
+        종목 틱 콜백 (스케줄러 기반 전략용)
 
         1. 현재가 조회
         2. DB 저장
@@ -542,97 +698,104 @@ class TradingEngine:
 
         Note: 체결 확인은 스케줄러에서 병렬 처리 전 1회 호출
         """
-        try:
-            # 1. 현재가 조회
-            price_info = self._broker.get_current_price(stock_code)
-            if not price_info:
-                logger.warning(f"Failed to get price: {stock_code}")
-                return
+        with self._tick_lock:
+            try:
+                # 1. 현재가 조회
+                price_info = self._broker.get_current_price(stock_code)
+                if not price_info:
+                    logger.warning(f"Failed to get price: {stock_code}")
+                    return
 
-            # 현재가 로그 출력
-            stock_config = self._settings.stocks.get(stock_code)
-            stock_name = stock_config.name if stock_config else stock_code
-            change_sign = "+" if price_info.change >= 0 else ""
-            logger.info(
-                f"[{stock_name}] 현재가: {price_info.current_price:,}원 "
-                f"({change_sign}{price_info.change_rate:.2f}%)"
-            )
-
-            # 2. DB 저장 (분봉 upsert)
-            minute_key = get_current_minute_key(now)
-            self._price_repo.upsert_from_api_response(
-                stock_code=stock_code,
-                current_price=price_info.current_price,
-                volume=price_info.volume,
-                minute_key=minute_key,
-            )
-
-            # 3. 중복 주문 방지
-            if self._order_manager.has_pending_order(stock_code):
-                return
-
-            # 4. 전략별 시그널 생성
-            stock_config = self._settings.stocks.get(stock_code)
-            if not stock_config:
-                return
-
-            strategies = stock_config.strategies
-
-            if not strategies:
-                # 전략 없음 → 가격만 저장
-                return
-
-            # 가격 히스토리 로드 (분봉)
-            price_history = self._price_repo.get_recent_prices(stock_code, count=60)
-
-            # 일봉 데이터 로드 (캐시에서)
-            daily_candles = self._daily_candles_cache.get(stock_code, [])
-
-            # 현재 포지션
-            position = self._position_manager.get_position(stock_code)
-            broker_position = self._get_broker_position(stock_code)
-
-            for strategy_config in strategies:
-                strategy_name = strategy_config.get("name")
-                key = (stock_code, strategy_name)
-                strategy = self._strategies.get(key)
-
-                if not strategy:
-                    continue
-
-                # 포지션 보유 시 해당 전략으로만 매도 가능
-                if position and position.strategy_name != strategy_name:
-                    continue
-
-                # 전략 컨텍스트 생성
-                context = StrategyContext(
-                    stock_code=stock_code,
-                    stock_name=stock_config.name,
-                    current_price=price_info.current_price,
-                    current_time=now,
-                    price_history=price_history,
-                    position=broker_position,
-                    daily_candles=daily_candles,
-                    today_trade_count=self._order_manager.get_today_trade_count(stock_code),
+                # 현재가 로그 출력
+                stock_config = self._settings.stocks.get(stock_code)
+                stock_name = stock_config.name if stock_config else stock_code
+                change_sign = "+" if price_info.change >= 0 else ""
+                logger.info(
+                    f"[{stock_name}] 현재가: {price_info.current_price:,}원 "
+                    f"({change_sign}{price_info.change_rate:.2f}%)"
                 )
 
-                # 시그널 생성 가능 여부 확인 (데이터 충분성, 가격 유효성)
-                if not strategy.can_generate_signal(context):
-                    validation = context.validate_price_data()
-                    if not validation.is_valid:
-                        logger.warning(
-                            f"[{stock_code}] Cannot generate signal: {validation.errors}"
-                        )
-                    continue
+                # 2. DB 저장 (분봉 upsert)
+                minute_key = get_current_minute_key(now)
+                self._price_repo.upsert_from_api_response(
+                    stock_code=stock_code,
+                    current_price=price_info.current_price,
+                    volume=price_info.volume,
+                    minute_key=minute_key,
+                )
 
-                # 시그널 생성
-                signal = strategy.generate_signal(context)
+                # 3. 중복 주문 방지
+                if self._order_manager.has_pending_order(stock_code):
+                    return
 
-                # 시그널 처리
-                self._process_signal(signal, context, strategy)
+                # 4. 전략별 시그널 생성
+                stock_config = self._settings.stocks.get(stock_code)
+                if not stock_config:
+                    return
 
-        except Exception as e:
-            logger.error(f"Stock tick error [{stock_code}]: {e}")
+                strategies = stock_config.strategies
+
+                if not strategies:
+                    # 전략 없음 → 가격만 저장
+                    return
+
+                # 가격 히스토리 로드 (분봉)
+                price_history = self._price_repo.get_recent_prices(stock_code, count=60)
+
+                # 일봉 데이터 로드 (캐시에서)
+                daily_candles = self._daily_candles_cache.get(stock_code, [])
+
+                # 현재 포지션
+                position = self._position_manager.get_position(stock_code)
+                broker_position = self._get_broker_position(stock_code)
+
+                for strategy_config in strategies:
+                    # WebSocket 전략은 스킵 (별도 처리)
+                    if strategy_config.get("execution_mode") == "websocket":
+                        continue
+
+                    strategy_name = strategy_config.get("name")
+                    key = (stock_code, strategy_name)
+                    strategy = self._strategies.get(key)
+
+                    if not strategy:
+                        continue
+
+                    # 포지션 보유 시 해당 전략으로만 매도 가능
+                    if position and position.strategy_name != strategy_name:
+                        continue
+
+                    # 전략 컨텍스트 생성
+                    context = StrategyContext(
+                        stock_code=stock_code,
+                        stock_name=stock_config.name,
+                        current_price=price_info.current_price,
+                        current_time=now,
+                        price_history=price_history,
+                        position=broker_position,
+                        daily_candles=daily_candles,
+                        today_trade_count=self._order_manager.get_today_trade_count(
+                            stock_code
+                        ),
+                    )
+
+                    # 시그널 생성 가능 여부 확인 (데이터 충분성, 가격 유효성)
+                    if not strategy.can_generate_signal(context):
+                        validation = context.validate_price_data()
+                        if not validation.is_valid:
+                            logger.warning(
+                                f"[{stock_code}] Cannot generate signal: {validation.errors}"
+                            )
+                        continue
+
+                    # 시그널 생성
+                    signal = strategy.generate_signal(context)
+
+                    # 시그널 처리
+                    self._process_signal(signal, context, strategy)
+
+            except Exception as e:
+                logger.error(f"Stock tick error [{stock_code}]: {e}")
 
     def _get_broker_position(self, stock_code: str) -> Optional[Position]:
         """브로커에서 Position 객체 조회"""
@@ -772,6 +935,9 @@ class TradingEngine:
                 f"Daily report: {report.total_trades} trades, "
                 f"PnL: {report.realized_pnl:,}원"
             )
+
+            # 3. 시그널 요약 전송
+            self._slack.send_signal_summary()
 
         except Exception as e:
             logger.error(f"Market close error: {e}")

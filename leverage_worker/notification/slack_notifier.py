@@ -11,7 +11,7 @@ Slack 알림 전송 (두 가지 방식 지원)
 
 import json
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 
@@ -46,6 +46,11 @@ class SlackNotifier:
         self._token = token
         self._channel = channel
         self._is_paper_mode = is_paper_mode
+
+        # 시그널 집계용 (종목-전략 pair별 첫 시그널만 즉시 전송)
+        self._signal_count: Dict[Tuple[str, str], int] = {}  # (stock_code, strategy) -> 발생 횟수
+        self._signal_first_sent: Set[Tuple[str, str]] = set()  # 첫 알림 전송된 pair
+        self._signal_stock_names: Dict[str, str] = {}  # stock_code -> stock_name 매핑
 
         # 우선순위: token+channel > webhook_url
         self._use_token = token is not None and channel is not None
@@ -216,7 +221,28 @@ class SlackNotifier:
         reason: str = "",
         strategy_win_rate: Optional[float] = None,
     ) -> bool:
-        """시그널 발생 알림 (매수/매도 시그널)"""
+        """시그널 발생 알림 (매수/매도 시그널)
+
+        첫 번째 시그널만 즉시 전송, 이후 시그널은 카운트만 증가.
+        send_signal_summary()로 요약 전송 가능.
+        """
+        key = (stock_code, strategy_name)
+
+        # 카운트 증가 및 종목명 저장
+        self._signal_count[key] = self._signal_count.get(key, 0) + 1
+        self._signal_stock_names[stock_code] = stock_name
+
+        # 첫 시그널이 아니면 전송하지 않고 성공 반환
+        if key in self._signal_first_sent:
+            logger.debug(
+                f"Signal skipped (already sent): {stock_name} {strategy_name} "
+                f"(count: {self._signal_count[key]})"
+            )
+            return True
+
+        # 첫 시그널 전송 표시
+        self._signal_first_sent.add(key)
+
         is_buy = signal_type.upper() == "BUY"
         signal_text = "매수시그널" if is_buy else "매도시그널"
         total_amount = quantity * price
@@ -359,3 +385,46 @@ class SlackNotifier:
         lines.append(timestamp)
 
         return self.send_message("\n".join(lines))
+
+    def reset_signal_history(self) -> None:
+        """시그널 기록 초기화 (다음 날 준비)"""
+        self._signal_count.clear()
+        self._signal_first_sent.clear()
+        self._signal_stock_names.clear()
+        logger.debug("Signal history reset")
+
+    def send_signal_summary(self) -> bool:
+        """
+        시그널 요약 전송
+
+        저장된 시그널 중 2회 이상 발생한 것들의 요약을 전송.
+        전송 후 시그널 기록 초기화.
+
+        Returns:
+            성공 여부 (시그널이 없거나 추가 시그널이 없으면 True)
+        """
+        if not self._signal_count:
+            logger.debug("No signals to summarize")
+            return True
+
+        # 2회 이상 발생한 시그널만 필터링 (첫 번째는 이미 전송됨)
+        summary_items = []
+        for (stock_code, strategy), count in sorted(self._signal_count.items()):
+            if count > 1:
+                stock_name = self._signal_stock_names.get(stock_code, stock_code)
+                summary_items.append(f"{strategy}: {count}회 ({stock_name})")
+
+        # 추가 시그널이 없으면 전송하지 않음
+        if not summary_items:
+            logger.debug("No additional signals to summarize (all first-time only)")
+            self.reset_signal_history()
+            return True
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        lines = [f"{self._get_mode_prefix()}[시그널요약]"]
+        lines.extend(summary_items)
+        lines.append(timestamp)
+
+        result = self.send_message("\n".join(lines))
+        self.reset_signal_history()
+        return result

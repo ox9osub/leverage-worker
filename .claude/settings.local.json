@@ -12,7 +12,9 @@
       "Bash(python -c:*)",
       "Bash(python -m py_compile:*)",
       "Bash(pip install:*)",
-      "Bash(.venv/Scripts/python:*)"
+      "Bash(.venv/Scripts/python:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nFEAT: Slack 알림 개선 \\(모의투자 구분, 단순 텍스트, 승률 표시\\)\n\n- 모의투자 모드시 모든 메시지에 [모의] prefix 추가\n- Block Kit 형식에서 단순 텍스트 형식으로 변경 \\(이모지 제거\\)\n- 전략별 백테스트 승률 표시 기능 추가\n- Settings에 get_strategy_win_rate\\(\\) 메서드 추가\n- trading_config.yaml에 win_rate 필드 지원\n\n🤖 Generated with [Claude Code]\\(https://claude.com/claude-code\\)\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")"
     ],
     "deny": [],
     "ask": []

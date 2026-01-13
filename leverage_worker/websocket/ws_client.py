@@ -1,0 +1,144 @@
+"""
+실시간 WebSocket 클라이언트
+
+KISWebSocket을 래핑하여 별도 스레드에서 실행
+체결 데이터 수신 시 콜백 호출
+"""
+
+import sys
+import threading
+from pathlib import Path
+from typing import Callable, List, Optional
+
+import pandas as pd
+import websockets
+
+from leverage_worker.utils.logger import get_logger
+from leverage_worker.websocket.tick_handler import TickData, TickHandler
+
+logger = get_logger(__name__)
+
+# kis_auth 모듈 경로 추가
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "examples_user"))
+
+import kis_auth as ka
+from domestic_stock.domestic_stock_functions_ws import ccnl_krx
+
+
+class RealtimeWSClient:
+    """
+    실시간 WebSocket 클라이언트
+
+    별도 스레드에서 KISWebSocket을 실행하여 실시간 체결 데이터 수신
+    체결 데이터 수신 시 on_tick 콜백 호출
+    """
+
+    def __init__(
+        self,
+        on_tick: Callable[[TickData], None],
+        on_error: Optional[Callable[[Exception], None]] = None,
+    ):
+        """
+        Args:
+            on_tick: 체결 데이터 수신 시 호출할 콜백
+            on_error: 에러 발생 시 호출할 콜백
+        """
+        self._on_tick = on_tick
+        self._on_error = on_error
+        self._tick_handler = TickHandler()
+
+        self._ws_thread: Optional[threading.Thread] = None
+        self._running = False
+        self._stock_codes: List[str] = []
+
+    def start(self, stock_codes: List[str]) -> None:
+        """
+        WebSocket 연결 시작 (별도 스레드)
+
+        Args:
+            stock_codes: 구독할 종목코드 목록
+        """
+        if self._running:
+            logger.warning("WebSocket client already running")
+            return
+
+        self._stock_codes = stock_codes
+        self._running = True
+
+        # 별도 스레드에서 WebSocket 실행
+        self._ws_thread = threading.Thread(
+            target=self._run_websocket,
+            name="WebSocketThread",
+            daemon=True,
+        )
+        self._ws_thread.start()
+        logger.info(f"WebSocket client started for {len(stock_codes)} stocks")
+
+    def stop(self) -> None:
+        """WebSocket 연결 중지"""
+        self._running = False
+        logger.info("WebSocket client stopped")
+
+    def _run_websocket(self) -> None:
+        """WebSocket 실행 (별도 스레드에서 호출)"""
+        try:
+            # WebSocket 인증
+            ka.auth_ws()
+            logger.info("WebSocket authenticated")
+
+            # WebSocket 객체 생성
+            kws = ka.KISWebSocket(api_url="/tryitout", max_retries=10)
+
+            # 종목별 체결가 구독 등록
+            for stock_code in self._stock_codes:
+                ka.KISWebSocket.subscribe(
+                    request=ccnl_krx,
+                    data=[stock_code],
+                )
+                logger.info(f"Subscribed to {stock_code}")
+
+            # WebSocket 시작 (블로킹)
+            kws.start(
+                on_result=self._on_ws_result,
+                result_all_data=False,
+            )
+
+        except Exception as e:
+            logger.error(f"WebSocket error: {e}")
+            if self._on_error:
+                self._on_error(e)
+
+    def _on_ws_result(
+        self,
+        ws: websockets.ClientConnection,
+        tr_id: str,
+        df: pd.DataFrame,
+        data_info: dict,
+    ) -> None:
+        """
+        WebSocket 데이터 수신 콜백
+
+        KISWebSocket의 on_result 콜백으로 설정됨
+        체결 데이터(H0STCNT0)만 처리하여 on_tick 콜백 호출
+        """
+        if not self._running:
+            return
+
+        # H0STCNT0 (체결가)만 처리
+        if tr_id != "H0STCNT0":
+            return
+
+        # 체결 데이터 파싱
+        tick_data = self._tick_handler.parse(df, tr_id)
+        if tick_data:
+            logger.debug(
+                f"[WS] {tick_data.stock_code} 체결: {tick_data.price:,}원 "
+                f"({tick_data.change_rate:+.2f}%)"
+            )
+            # 콜백 호출
+            self._on_tick(tick_data)
+
+    @property
+    def is_running(self) -> bool:
+        """실행 중 여부"""
+        return self._running
