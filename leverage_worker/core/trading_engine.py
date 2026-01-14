@@ -277,7 +277,7 @@ class TradingEngine:
                 # 활성 주문 목록 업데이트 (복구용)
                 if self._order_manager:
                     active_orders = [
-                        o["order_id"] for o in self._order_manager.get_active_orders()
+                        o.order_id for o in self._order_manager.get_active_orders()
                     ]
                     self._recovery_manager.update_active_orders(active_orders)
 
