@@ -167,3 +167,6 @@ cython_debug/
 *_logs/
 leverage_worker/config/credentials/*.yaml
 leverage_worker/config/trading_config.yaml
+leverage_worker/data/market_data.db
+leverage_worker/data/trading_paper.db
+leverage_worker/data/trading_live.db
