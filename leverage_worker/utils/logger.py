@@ -124,6 +124,7 @@ def setup_logger(
         return logger
 
     logger.setLevel(level)
+    logger.propagate = False  # 부모 로거로 전파 방지
 
     # 민감정보 마스킹 필터 추가
     sensitive_filter = SensitiveDataFilter()
@@ -132,7 +133,7 @@ def setup_logger(
     # 포맷터 설정
     console_formatter = logging.Formatter(
         fmt="%(asctime)s [%(levelname)s] %(message)s",
-        datefmt="%H:%M:%S"
+        datefmt="%Y-%m-%d %H:%M:%S"
     )
     file_formatter = logging.Formatter(
         fmt="%(asctime)s [%(levelname)s] %(name)s - %(message)s",
