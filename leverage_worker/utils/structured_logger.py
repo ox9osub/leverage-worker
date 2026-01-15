@@ -83,6 +83,7 @@ class StructuredLogger:
         # 로거 설정
         self._logger = logging.getLogger("structured")
         self._logger.setLevel(logging.DEBUG)
+        self._logger.propagate = False  # 루트 로거로 전파 방지
         self._logger.addFilter(SensitiveDataFilter())
 
         # 중복 방지
