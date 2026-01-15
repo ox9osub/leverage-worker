@@ -382,6 +382,29 @@ class SlackNotifier:
             if len(trades) > 10:
                 lines.append(f"... 외 {len(trades) - 10}건")
 
+        # 보유 포지션 (있으면)
+        positions = report.get("positions", [])
+        if positions:
+            lines.append("---")
+            lines.append("[보유포지션]")
+            total_eval_pnl = 0
+            for p in positions[:10]:  # 최대 10건
+                pnl = p.get("profit_loss", 0)
+                pnl_rate = p.get("profit_loss_rate", 0.0)
+                total_eval_pnl += pnl
+                pnl_sign = "+" if pnl >= 0 else ""
+                lines.append(
+                    f"{p.get('stock_name', p.get('stock_code', '???'))} "
+                    f"{p.get('quantity', 0)}주 | "
+                    f"평가손익: {pnl_sign}{pnl:,}원 ({pnl_sign}{pnl_rate:.2f}%)"
+                )
+
+            if len(positions) > 10:
+                lines.append(f"... 외 {len(positions) - 10}건")
+
+            eval_sign = "+" if total_eval_pnl >= 0 else ""
+            lines.append(f"총 평가손익: {eval_sign}{total_eval_pnl:,}원")
+
         lines.append(timestamp)
 
         return self.send_message("\n".join(lines))

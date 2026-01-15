@@ -33,6 +33,19 @@ class TradeRecord:
 
 
 @dataclass
+class PositionRecord:
+    """보유 포지션 기록"""
+    stock_code: str
+    stock_name: str
+    quantity: int
+    avg_price: float
+    current_price: float
+    profit_loss: int = 0  # 평가손익
+    profit_loss_rate: float = 0.0  # 수익률
+    strategy_name: Optional[str] = None
+
+
+@dataclass
 class DailyReport:
     """일일 리포트"""
     date: str
@@ -43,6 +56,7 @@ class DailyReport:
     win_trades: int = 0
     lose_trades: int = 0
     trades: List[TradeRecord] = field(default_factory=list)
+    positions: List[PositionRecord] = field(default_factory=list)
 
     @property
     def win_rate(self) -> float:
@@ -73,6 +87,19 @@ class DailyReport:
                     "order_time": t.order_time,
                 }
                 for t in self.trades
+            ],
+            "positions": [
+                {
+                    "stock_code": p.stock_code,
+                    "stock_name": p.stock_name,
+                    "quantity": p.quantity,
+                    "avg_price": p.avg_price,
+                    "current_price": p.current_price,
+                    "profit_loss": p.profit_loss,
+                    "profit_loss_rate": p.profit_loss_rate,
+                    "strategy_name": p.strategy_name,
+                }
+                for p in self.positions
             ],
         }
 
@@ -153,10 +180,40 @@ class DailyReportGenerator:
 
             report.trades.append(trade)
 
+        # 현재 보유 포지션 조회
+        position_query = """
+            SELECT * FROM positions
+            WHERE quantity > 0
+            ORDER BY stock_code ASC
+        """
+        position_rows = self._db.fetch_all(position_query)
+
+        for row in position_rows:
+            avg_price = row["avg_price"]
+            current_price = row["current_price"] or avg_price
+            quantity = row["quantity"]
+
+            # 평가손익 계산
+            profit_loss = int((current_price - avg_price) * quantity)
+            profit_loss_rate = ((current_price - avg_price) / avg_price * 100) if avg_price > 0 else 0.0
+
+            position = PositionRecord(
+                stock_code=row["stock_code"],
+                stock_name=row["stock_name"] or row["stock_code"],
+                quantity=quantity,
+                avg_price=avg_price,
+                current_price=current_price,
+                profit_loss=profit_loss,
+                profit_loss_rate=profit_loss_rate,
+                strategy_name=row["strategy_name"],
+            )
+            report.positions.append(position)
+
         logger.info(
             f"Report generated for {date}: "
             f"{report.total_trades} trades, "
-            f"PnL: {report.realized_pnl:,}원"
+            f"PnL: {report.realized_pnl:,}원, "
+            f"Positions: {len(report.positions)}건"
         )
 
         return report
