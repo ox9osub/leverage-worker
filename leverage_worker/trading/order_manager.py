@@ -129,7 +129,7 @@ class OrderManager:
         """
         # 중복 주문 체크
         if stock_code in self._pending_stocks:
-            logger.warning(f"Duplicate order blocked: {stock_code}")
+            logger.warning(f"[{stock_code}] 매수 주문 차단: 중복 주문 (pending 상태의 주문 존재)")
             self._audit.log_order(
                 event_type="ORDER_REJECTED",
                 module="OrderManager",
@@ -149,7 +149,7 @@ class OrderManager:
         if check_deposit:
             price_info = self._broker.get_current_price(stock_code)
             if not price_info:
-                logger.error(f"Cannot get price for deposit check: {stock_code}")
+                logger.error(f"[{stock_code}] 매수 주문 차단: 현재가 조회 실패")
                 self._audit.log_order(
                     event_type="ORDER_REJECTED",
                     module="OrderManager",
@@ -174,8 +174,8 @@ class OrderManager:
                 logger.warning(f"Cannot get deposit, proceeding without check: {stock_code}")
             elif deposit < required_amount:
                 logger.warning(
-                    f"Insufficient deposit for {stock_code}: "
-                    f"required={required_amount:,}, available={deposit:,}"
+                    f"[{stock_code}] 매수 주문 차단: 예수금 부족 "
+                    f"(필요: {required_amount:,}원, 보유: {deposit:,}원)"
                 )
                 self._audit.log_order(
                     event_type="ORDER_REJECTED",
@@ -202,7 +202,7 @@ class OrderManager:
         result = self._broker.place_market_order(stock_code, OrderSide.BUY, quantity)
 
         if not result.success:
-            logger.error(f"Buy order failed: {stock_code} - {result.message}")
+            logger.error(f"[{stock_code}] 매수 주문 실패: 브로커 거절 - {result.message}")
             self._audit.log_order(
                 event_type="ORDER_REJECTED",
                 module="OrderManager",
@@ -275,7 +275,7 @@ class OrderManager:
         """
         # 중복 주문 체크
         if stock_code in self._pending_stocks:
-            logger.warning(f"Duplicate order blocked: {stock_code}")
+            logger.warning(f"[{stock_code}] 매도 주문 차단: 중복 주문 (pending 상태의 주문 존재)")
             self._audit.log_order(
                 event_type="ORDER_REJECTED",
                 module="OrderManager",
@@ -295,7 +295,7 @@ class OrderManager:
         result = self._broker.place_market_order(stock_code, OrderSide.SELL, quantity)
 
         if not result.success:
-            logger.error(f"Sell order failed: {stock_code} - {result.message}")
+            logger.error(f"[{stock_code}] 매도 주문 실패: 브로커 거절 - {result.message}")
             self._audit.log_order(
                 event_type="ORDER_REJECTED",
                 module="OrderManager",
