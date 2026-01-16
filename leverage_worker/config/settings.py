@@ -232,6 +232,17 @@ class Settings:
                     return strategy.get("win_rate")
         return None
 
+    def get_strategy_allocation(
+        self, stock_code: str, strategy_name: str
+    ) -> float:
+        """전략의 자금 할당 비율 반환 (기본값: 100%)"""
+        stock = self._stocks.get(stock_code)
+        if stock:
+            for strategy in stock.strategies:
+                if strategy.get("name") == strategy_name:
+                    return float(strategy.get("allocation", 100))
+        return 100.0
+
     def get_server_url(self) -> str:
         """API 서버 URL 반환"""
         if self.mode == TradingMode.LIVE:

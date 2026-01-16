@@ -41,6 +41,7 @@ from leverage_worker.trading.order_manager import ManagedOrder, OrderManager
 from leverage_worker.trading.position_manager import PositionManager
 from leverage_worker.utils.logger import get_logger
 from leverage_worker.utils.log_constants import LogEventType
+from leverage_worker.utils.math_utils import calculate_allocation_amount
 from leverage_worker.utils.structured_logger import get_structured_logger
 from leverage_worker.utils.time_utils import get_current_minute_key
 from leverage_worker.websocket import RealtimeWSClient, TickData
@@ -625,6 +626,7 @@ class TradingEngine:
 
                 # 중복 주문 방지
                 if self._order_manager.has_pending_order(stock_code):
+                    logger.debug(f"[WS][{stock_code}] 미체결 주문 존재 - 시그널 생성 스킵")
                     return
 
                 # WebSocket 전략만 실행
@@ -652,11 +654,18 @@ class TradingEngine:
                     strategy = self._strategies.get(key)
 
                     if not strategy:
+                        logger.warning(f"[WS][{stock_code}] 전략 '{strategy_name}' 인스턴스 없음")
                         continue
 
                     # 포지션 보유 시 해당 전략으로만 매도 가능
                     if position and position.strategy_name != strategy_name:
+                        logger.debug(
+                            f"[WS][{stock_code}] 포지션 전략({position.strategy_name}) != "
+                            f"현재 전략({strategy_name}) - 스킵"
+                        )
                         continue
+
+                    logger.debug(f"[WS][{stock_code}] 전략 '{strategy_name}' 실행 시작")
 
                     # 전략 컨텍스트 생성
                     context = StrategyContext(
@@ -828,17 +837,35 @@ class TradingEngine:
 
         if signal.is_buy:
             # 매수 시그널
+            logger.info(f"[{stock_code}] 매수 시그널 처리 시작: {signal.reason}")
             strategy.on_entry(context, signal)
 
-            # 전략 승률 가져오기
+            # 전략 승률 및 allocation 가져오기
             win_rate = self._settings.get_strategy_win_rate(stock_code, strategy.name)
+            allocation = self._settings.get_strategy_allocation(stock_code, strategy.name)
+
+            # 매수 가능 수량 조회 (종목증거금율 반영, 가장 정확)
+            max_buyable_qty = self._broker.get_buyable_quantity(stock_code)
+            if max_buyable_qty > 0:
+                # allocation 비율 적용
+                quantity = int(max_buyable_qty * (allocation / 100))
+                if quantity < 1:
+                    logger.warning(f"[{stock_code}] 계산된 수량 0 → 최소 1주로 설정")
+                    quantity = 1
+                logger.info(
+                    f"[{stock_code}] 매수 수량 계산: {quantity}주 "
+                    f"(매수가능: {max_buyable_qty}주, allocation: {allocation}%)"
+                )
+            else:
+                quantity = signal.quantity
+                logger.warning(f"[{stock_code}] 매수가능수량 조회 실패 → 시그널 수량 사용: {quantity}주")
 
             # 시그널 알림 (주문 전)
             self._slack.notify_signal(
                 signal_type="BUY",
                 stock_code=stock_code,
                 stock_name=stock_name,
-                quantity=signal.quantity,
+                quantity=quantity,
                 price=context.current_price,
                 strategy_name=strategy.name,
                 reason=signal.reason,
@@ -848,20 +875,23 @@ class TradingEngine:
             order_id = self._order_manager.place_buy_order(
                 stock_code=stock_code,
                 stock_name=stock_name,
-                quantity=signal.quantity,
+                quantity=quantity,
                 strategy_name=strategy.name,
             )
 
             if order_id:
+                logger.info(f"[{stock_code}] 매수 주문 성공: {order_id}")
                 self._slack.notify_buy(
                     stock_code=stock_code,
                     stock_name=stock_name,
-                    quantity=signal.quantity,
+                    quantity=quantity,
                     price=context.current_price,
                     strategy_name=strategy.name,
                     reason=signal.reason,
                     strategy_win_rate=win_rate,
                 )
+            else:
+                logger.warning(f"[{stock_code}] 매수 주문 실패 (order_manager 반환값 None)")
 
         elif signal.is_sell:
             # 매도 시그널
@@ -916,6 +946,9 @@ class TradingEngine:
     def _on_market_open(self) -> None:
         """장 시작 콜백"""
         logger.info("Market opened - syncing positions")
+
+        # 정규장 시작 알림
+        self._slack.send_market_open_notification()
 
         # 포지션 동기화
         self._position_manager.sync_with_broker()

@@ -337,6 +337,23 @@ class SlackNotifier:
 
         return self.send_message("\n".join(lines))
 
+    def send_market_open_notification(self) -> bool:
+        """
+        정규장 시작 알림 전송
+
+        Returns:
+            성공 여부
+        """
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        lines = [
+            f"{self._get_mode_prefix()}[정규장 시작]",
+            "09:00 정규장이 시작되었습니다.",
+            timestamp,
+        ]
+
+        return self.send_message("\n".join(lines))
+
     def send_daily_report(self, report: Dict[str, Any]) -> bool:
         """
         일일 리포트 전송

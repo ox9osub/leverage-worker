@@ -182,12 +182,19 @@ class DipBuyStrategy(BaseStrategy):
         """시그널 생성 가능 여부 확인"""
         # 포지션 보유 중이면 청산 로직을 위해 항상 True
         if context.has_position:
+            logger.debug(f"[dip_buy][{context.stock_code}] 포지션 보유 중 - 청산 로직 실행 가능")
             return True
 
         # 미보유 시에는 작동 시간대 확인
         if not self._is_trading_time(context.current_time):
+            current = context.current_time.time()
+            logger.debug(
+                f"[dip_buy][{context.stock_code}] 시간대 외: {current} "
+                f"(범위: {self._trading_start}~{self._trading_end})"
+            )
             return False
 
+        logger.debug(f"[dip_buy][{context.stock_code}] 시그널 생성 가능")
         return True
 
     def generate_signal(self, context: StrategyContext) -> TradingSignal:
@@ -224,6 +231,10 @@ class DipBuyStrategy(BaseStrategy):
 
         if dip_rate >= self._dip_threshold_pct:
             # 진입
+            logger.info(
+                f"[dip_buy][{stock_code}] 매수 조건 충족: "
+                f"하락률 {dip_rate*100:.2f}% >= {self._dip_threshold_pct*100:.2f}%"
+            )
             self._entry_bar_count = 0
             self._entry_price = current_price
             self._last_candle_start = candle_start
@@ -235,6 +246,10 @@ class DipBuyStrategy(BaseStrategy):
                 confidence=0.9,
             )
 
+        logger.debug(
+            f"[dip_buy][{stock_code}] 매수 조건 미충족: "
+            f"하락률 {dip_rate*100:.2f}% < {self._dip_threshold_pct*100:.2f}%"
+        )
         return TradingSignal.hold(
             stock_code, f"진입 조건 미충족 (하락률: {dip_rate*100:.2f}%)"
         )
