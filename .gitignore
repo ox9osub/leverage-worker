@@ -169,3 +169,5 @@ leverage_worker/config/credentials/*.yaml
 leverage_worker/data/market_data.db
 leverage_worker/data/trading_paper.db
 leverage_worker/data/trading_live.db
+*.db
+/logs/audit/*.db
