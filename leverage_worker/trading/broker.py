@@ -700,13 +700,15 @@ class KISBroker:
         self,
         stock_code: str,
         time_unit: str = "1",
+        target_hour: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
-        분봉 데이터 조회 (당일 기준 최근 30개)
+        분봉 데이터 조회 (기준 시간부터 최근 30개)
 
         Args:
             stock_code: 종목코드 (6자리)
             time_unit: 분봉 단위 (1, 3, 5, 10, 15, 30, 60)
+            target_hour: 조회 기준 시간 (HHMMSS 형식, None이면 현재 시간)
 
         Returns:
             분봉 데이터 리스트 (최신순)
@@ -715,9 +717,11 @@ class KISBroker:
             api_url = "/uapi/domestic-stock/v1/quotations/inquire-time-itemchartprice"
             tr_id = "FHKST03010200"
 
-            # 현재 시간을 기준으로 조회
-            now = datetime.now()
-            fid_input_hour = now.strftime("%H%M%S")
+            # 기준 시간 설정 (target_hour가 없으면 현재 시간)
+            if target_hour is None:
+                fid_input_hour = datetime.now().strftime("%H%M%S")
+            else:
+                fid_input_hour = target_hour
 
             params = {
                 "FID_COND_MRKT_DIV_CODE": "J",

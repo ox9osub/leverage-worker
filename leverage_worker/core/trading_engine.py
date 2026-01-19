@@ -401,46 +401,76 @@ class TradingEngine:
 
     def _load_minute_candles(self) -> None:
         """
-        시작 시 분봉 이력 로드
+        시작 시 분봉 이력 로드 (60개 이상 확보)
 
-        각 종목에 대해 당일 분봉 데이터를 API에서 조회하여 DB에 저장
+        각 종목에 대해 분봉 데이터를 API에서 연속 2회 조회하여 DB에 저장
+        ML 전략에 필요한 최소 60개 분봉 데이터를 확보
         """
         for stock_code in self._settings.stocks.keys():
             try:
-                # API에서 분봉 조회
-                candle_data = self._broker.get_minute_candles(stock_code=stock_code)
+                total_saved = 0
 
-                if not candle_data:
-                    logger.debug(f"No minute candle data for {stock_code}")
-                    continue
+                # 1차: 현재 시간 기준 30개 로드
+                candle_data_1 = self._broker.get_minute_candles(stock_code=stock_code)
+                saved_1 = self._save_minute_candles(stock_code, candle_data_1)
+                total_saved += saved_1
 
-                # DB에 저장 (장중 데이터만)
-                saved_count = 0
-                for data in candle_data:
-                    trade_date = data.get("trade_date", "")
-                    time_str = data.get("time", "")
-                    if len(trade_date) >= 8 and len(time_str) >= 4:
-                        # 장중 시간 필터 (09:00 ~ 15:30)
-                        hour_min = time_str[:4]  # HHMM
-                        if not ("0900" <= hour_min <= "1530"):
-                            continue
-
-                        # YYYYMMDD + HHMMSS -> YYYYMMDD_HHMM 형식으로 변환
-                        minute_key = f"{trade_date}_{hour_min}"
-                        self._price_repo.upsert_from_api_response(
+                # 가장 오래된 분봉의 시간 추출하여 2차 호출
+                if candle_data_1:
+                    oldest_time = candle_data_1[-1].get("time", "")  # HHMMSS
+                    if oldest_time and len(oldest_time) >= 6:
+                        # 2차: 이전 시간대 30개 추가 로드
+                        candle_data_2 = self._broker.get_minute_candles(
                             stock_code=stock_code,
-                            current_price=data["close_price"],
-                            volume=data["volume"],
-                            minute_key=minute_key,
+                            target_hour=oldest_time,
                         )
-                        saved_count += 1
+                        saved_2 = self._save_minute_candles(stock_code, candle_data_2)
+                        total_saved += saved_2
 
                 logger.info(
-                    f"Loaded {saved_count}/{len(candle_data)} minute candles for {stock_code} (trading hours only)"
+                    f"Loaded {total_saved} minute candles for {stock_code} (trading hours only)"
                 )
 
             except Exception as e:
                 logger.error(f"Failed to load minute candles for {stock_code}: {e}")
+
+    def _save_minute_candles(
+        self, stock_code: str, candle_data: list
+    ) -> int:
+        """
+        분봉 데이터 DB 저장 (헬퍼 함수)
+
+        Args:
+            stock_code: 종목코드
+            candle_data: API에서 조회한 분봉 데이터 리스트
+
+        Returns:
+            저장된 분봉 개수
+        """
+        if not candle_data:
+            return 0
+
+        saved_count = 0
+        for data in candle_data:
+            trade_date = data.get("trade_date", "")
+            time_str = data.get("time", "")
+            if len(trade_date) >= 8 and len(time_str) >= 4:
+                # 장중 시간 필터 (09:00 ~ 15:30)
+                hour_min = time_str[:4]  # HHMM
+                if not ("0900" <= hour_min <= "1530"):
+                    continue
+
+                # YYYYMMDD + HHMMSS -> YYYYMMDD_HHMM 형식으로 변환
+                minute_key = f"{trade_date}_{hour_min}"
+                self._price_repo.upsert_from_api_response(
+                    stock_code=stock_code,
+                    current_price=data["close_price"],
+                    volume=data["volume"],
+                    minute_key=minute_key,
+                )
+                saved_count += 1
+
+        return saved_count
 
     def _load_strategies(self) -> None:
         """전략 인스턴스 로드"""
