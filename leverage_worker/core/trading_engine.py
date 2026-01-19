@@ -474,6 +474,8 @@ class TradingEngine:
 
     def _load_strategies(self) -> None:
         """전략 인스턴스 로드"""
+        failed_strategies = []
+
         for stock_code, stock_config in self._settings.stocks.items():
             strategies = stock_config.strategies
 
@@ -489,10 +491,24 @@ class TradingEngine:
                     key = (stock_code, name)
                     self._strategies[key] = strategy
                     logger.debug(f"Strategy loaded: {stock_code} -> {name}")
+
+                    # ML 전략의 경우 모델 로드 미리 시도
+                    if hasattr(strategy, "_ensure_model_loaded"):
+                        if not strategy._ensure_model_loaded():
+                            failed_strategies.append((stock_code, name))
                 else:
                     logger.warning(f"Strategy not found: {name}")
+                    failed_strategies.append((stock_code, name))
 
         logger.info(f"Loaded {len(self._strategies)} strategy instances")
+
+        # 실패한 전략이 있으면 Slack 알림
+        if failed_strategies:
+            failed_list = "\n".join([f"- {code}: {name}" for code, name in failed_strategies])
+            self._slack.notify_error(
+                "전략 로드 실패",
+                f"다음 전략이 로드되지 않았습니다:\n{failed_list}"
+            )
 
     def _print_account_balance(self) -> None:
         """계좌 잔고 조회 및 출력 (API 연결 확인용)"""
