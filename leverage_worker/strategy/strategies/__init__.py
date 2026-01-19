@@ -10,6 +10,10 @@ KODEX 레버리지 (122630) 전략:
     - fibonacci_lucky: 피보나치 5일 전략 (E_Fib5_Lucky7)
     - fee_optimized: 수수료 최적화 전략 (B_FeeOpt)
 
+ML 기반 전략 (122630):
+    - ml_price_position: ML 가격 위치 전략 (변동성 예측 + 가격 위치)
+    - ml_momentum: ML 모멘텀 전략 (변동성 예측 + 모멘텀)
+
 KODEX 코스닥150레버리지 (233740) 전략:
     - kosdaq_bb_conservative: 볼린저 밴드 보수적 전략 (BB_Conservative)
     - kosdaq_donchian: 돈치안 채널 전략 (Donchian_Scientific)
@@ -33,6 +37,10 @@ from leverage_worker.strategy.strategies.bollinger_band import BollingerBandStra
 from leverage_worker.strategy.strategies.fibonacci_lucky import FibonacciLuckyStrategy
 from leverage_worker.strategy.strategies.fee_optimized import FeeOptimizedStrategy
 
+# ML 기반 전략 (122630)
+from leverage_worker.strategy.strategies.ml_price_position import MLPricePositionStrategy
+from leverage_worker.strategy.strategies.ml_momentum import MLMomentumStrategy
+
 # KODEX 코스닥150레버리지 (233740) 전략
 from leverage_worker.strategy.strategies.kosdaq_bb_conservative import (
     KosdaqBBConservativeStrategy,
@@ -54,6 +62,9 @@ __all__ = [
     "BollingerBandStrategy",
     "FibonacciLuckyStrategy",
     "FeeOptimizedStrategy",
+    # ML 기반 전략 (122630)
+    "MLPricePositionStrategy",
+    "MLMomentumStrategy",
     # KODEX 코스닥150레버리지 (233740) 전략
     "KosdaqBBConservativeStrategy",
     "KosdaqDonchianStrategy",
