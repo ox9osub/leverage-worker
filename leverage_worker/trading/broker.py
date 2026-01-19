@@ -297,8 +297,13 @@ class KISBroker:
             body = res.get_body()
             output = body.output
 
-            order_id = getattr(output, "ODNO", "")
-            order_time = getattr(output, "ORD_TMD", "")
+            # output이 딕셔너리인 경우와 namedtuple인 경우 모두 처리
+            if isinstance(output, dict):
+                order_id = output.get("ODNO", "")
+                order_time = output.get("ORD_TMD", "")
+            else:
+                order_id = getattr(output, "ODNO", "")
+                order_time = getattr(output, "ORD_TMD", "")
 
             logger.info(
                 f"Order placed: {side.value} {stock_code} x {quantity} - "
@@ -445,10 +450,16 @@ class KISBroker:
         try:
             body = res.get_body()
 
+            # dict/객체 모두 처리하는 헬퍼 함수
+            def get_value(obj, key: str, default=0):
+                if isinstance(obj, dict):
+                    return obj.get(key, default)
+                return getattr(obj, key, default)
+
             if hasattr(body, "output1"):
                 for item in body.output1:
-                    order_qty = int(getattr(item, "ord_qty", 0))
-                    filled_qty = int(getattr(item, "tot_ccld_qty", 0))
+                    order_qty = int(get_value(item, "ord_qty", 0) or 0)
+                    filled_qty = int(get_value(item, "tot_ccld_qty", 0) or 0)
 
                     # 상태 판단
                     if filled_qty == 0:
@@ -459,22 +470,22 @@ class KISBroker:
                         status = OrderStatus.FILLED
 
                     # 매수/매도 구분
-                    sll_buy = getattr(item, "sll_buy_dvsn_cd", "")
+                    sll_buy = get_value(item, "sll_buy_dvsn_cd", "")
                     side = OrderSide.BUY if sll_buy == "02" else OrderSide.SELL
 
                     orders.append(OrderInfo(
-                        order_id=getattr(item, "odno", ""),
-                        order_no=getattr(item, "orgn_odno", ""),
-                        branch_no=getattr(item, "ord_gno_brno", ""),
-                        stock_code=getattr(item, "pdno", ""),
-                        stock_name=getattr(item, "prdt_name", ""),
+                        order_id=get_value(item, "odno", ""),
+                        order_no=get_value(item, "orgn_odno", ""),
+                        branch_no=get_value(item, "ord_gno_brno", ""),
+                        stock_code=get_value(item, "pdno", ""),
+                        stock_name=get_value(item, "prdt_name", ""),
                         side=side,
                         order_qty=order_qty,
-                        order_price=int(getattr(item, "ord_unpr", 0)),
+                        order_price=int(get_value(item, "ord_unpr", 0) or 0),
                         filled_qty=filled_qty,
-                        filled_price=int(getattr(item, "avg_prvs", 0)),
+                        filled_price=int(get_value(item, "avg_prvs", 0) or 0),
                         status=status,
-                        order_time=getattr(item, "ord_tmd", ""),
+                        order_time=get_value(item, "ord_tmd", ""),
                     ))
 
         except Exception as e:
@@ -536,8 +547,11 @@ class KISBroker:
             body = res.get_body()
             output = body.output
 
-            # 미수 없는 매수 수량
-            qty = int(getattr(output, "nrcvb_buy_qty", 0))
+            # output이 딕셔너리인 경우와 namedtuple인 경우 모두 처리
+            if isinstance(output, dict):
+                qty = int(output.get("nrcvb_buy_qty", 0) or 0)
+            else:
+                qty = int(getattr(output, "nrcvb_buy_qty", 0) or 0)
             return qty
 
         except Exception as e:
