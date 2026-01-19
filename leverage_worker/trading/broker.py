@@ -510,7 +510,6 @@ class KISBroker:
                     if self.cancel_order(order.order_id, order.branch_no, remaining):
                         cancelled += 1
 
-        logger.info(f"Cancelled {cancelled} pending orders")
         return cancelled
 
     def get_buyable_quantity(self, stock_code: str) -> int:

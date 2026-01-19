@@ -520,8 +520,6 @@ class OrderManager:
         self._active_orders.clear()
         self._pending_stocks.clear()
 
-        logger.info(f"Cancelled all pending orders: {cancelled}")
-
         return cancelled
 
     def get_active_orders(self) -> List[ManagedOrder]:

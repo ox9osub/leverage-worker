@@ -433,6 +433,15 @@ class SlackNotifier:
         self._signal_stock_names.clear()
         logger.debug("Signal history reset")
 
+    def reset_signal_for_key(self, stock_code: str, strategy_name: str) -> None:
+        """특정 종목-전략의 시그널 기록 초기화 (체결 완료 시 호출)"""
+        key = (stock_code, strategy_name)
+        if key in self._signal_first_sent:
+            self._signal_first_sent.discard(key)
+        if key in self._signal_count:
+            del self._signal_count[key]
+        logger.debug(f"Signal history reset for {stock_code}/{strategy_name}")
+
     def send_signal_summary(self) -> bool:
         """
         시그널 요약 전송

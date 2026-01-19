@@ -595,6 +595,11 @@ class TradingEngine:
                 profit_rate=profit_rate,
                 strategy_win_rate=win_rate,
             )
+
+            # 체결 완료 시 시그널 기록 리셋 (다음 시그널도 알림 받기 위함)
+            if order.strategy_name:
+                self._slack.reset_signal_for_key(order.stock_code, order.strategy_name)
+
         except Exception as e:
             logger.error(f"Order fill notification error: {e}")
 
@@ -890,21 +895,24 @@ class TradingEngine:
             win_rate = self._settings.get_strategy_win_rate(stock_code, strategy.name)
             allocation = self._settings.get_strategy_allocation(stock_code, strategy.name)
 
-            # 매수 가능 수량 조회 (종목증거금율 반영, 가장 정확)
-            max_buyable_qty = self._broker.get_buyable_quantity(stock_code)
-            if max_buyable_qty > 0:
+            # 매수 수량 계산: 예수금 98.5% 기준
+            deposit = self._broker.get_deposit()
+            if deposit > 0 and context.current_price > 0:
+                # 예수금의 98.5% 사용
+                available_amount = int(deposit * 0.985)
+                max_qty_by_deposit = available_amount // context.current_price
                 # allocation 비율 적용
-                quantity = int(max_buyable_qty * (allocation / 100))
+                quantity = int(max_qty_by_deposit * (allocation / 100))
                 if quantity < 1:
                     logger.warning(f"[{stock_code}] 계산된 수량 0 → 최소 1주로 설정")
                     quantity = 1
                 logger.info(
                     f"[{stock_code}] 매수 수량 계산: {quantity}주 "
-                    f"(매수가능: {max_buyable_qty}주, allocation: {allocation}%)"
+                    f"(예수금: {deposit:,}원, 98.5%: {available_amount:,}원, allocation: {allocation}%)"
                 )
             else:
                 quantity = signal.quantity
-                logger.warning(f"[{stock_code}] 매수가능수량 조회 실패 → 시그널 수량 사용: {quantity}주")
+                logger.warning(f"[{stock_code}] 예수금 조회 실패 → 시그널 수량 사용: {quantity}주")
 
             # 시그널 알림 (주문 전)
             self._slack.notify_signal(
@@ -937,7 +945,44 @@ class TradingEngine:
                     strategy_win_rate=win_rate,
                 )
             else:
-                logger.warning(f"[{stock_code}] 매수 주문 실패 (order_manager 반환값 None)")
+                # 주문 실패 → 증거금률 기준으로 재시도
+                logger.warning(f"[{stock_code}] 예수금 98.5% 주문 실패 → 증거금률 기준 재시도")
+                self._slack.send_message(
+                    f"{self._slack._get_mode_prefix()}[주문재시도]\n"
+                    f"{stock_name}({stock_code}) 예수금 98.5% 주문 실패\n"
+                    f"증거금률 기준으로 재시도합니다."
+                )
+
+                # get_buyable_quantity API로 안전한 수량 조회
+                safe_qty = self._broker.get_buyable_quantity(stock_code)
+                if safe_qty > 0:
+                    retry_qty = int(safe_qty * (allocation / 100))
+                    if retry_qty < 1:
+                        retry_qty = 1
+                    logger.info(f"[{stock_code}] 재시도 수량: {retry_qty}주 (증거금률 반영)")
+
+                    order_id = self._order_manager.place_buy_order(
+                        stock_code=stock_code,
+                        stock_name=stock_name,
+                        quantity=retry_qty,
+                        strategy_name=strategy.name,
+                    )
+
+                    if order_id:
+                        logger.info(f"[{stock_code}] 재시도 매수 주문 성공: {order_id}")
+                        self._slack.notify_buy(
+                            stock_code=stock_code,
+                            stock_name=stock_name,
+                            quantity=retry_qty,
+                            price=context.current_price,
+                            strategy_name=strategy.name,
+                            reason=signal.reason,
+                            strategy_win_rate=win_rate,
+                        )
+                    else:
+                        logger.error(f"[{stock_code}] 재시도 매수 주문도 실패")
+                else:
+                    logger.error(f"[{stock_code}] 증거금률 기준 수량 조회 실패")
 
         elif signal.is_sell:
             # 매도 시그널
@@ -1001,8 +1046,6 @@ class TradingEngine:
 
     def _on_market_close(self) -> None:
         """장 마감 콜백"""
-        logger.info("Market closed")
-
         try:
             # 1. 미체결 주문 취소
             cancelled = self._order_manager.cancel_all_pending()
