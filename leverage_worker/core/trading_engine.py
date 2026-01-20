@@ -770,9 +770,18 @@ class TradingEngine:
                 stock_config = self._settings.stocks.get(stock_code)
                 stock_name = stock_config.name if stock_config else stock_code
                 change_sign = "+" if price_info.change >= 0 else ""
+
+                # 보유 포지션 수익률 계산
+                position_profit_str = ""
+                position = self._position_manager.get_position(stock_code)
+                if position and position.avg_price > 0:
+                    position_profit_rate = (price_info.current_price - position.avg_price) / position.avg_price * 100
+                    position_sign = "+" if position_profit_rate >= 0 else ""
+                    position_profit_str = f" ({position_sign}{position_profit_rate:.1f}%)"
+
                 logger.info(
                     f"[{stock_name}] 현재가: {price_info.current_price:,}원 "
-                    f"({change_sign}{price_info.change_rate:.2f}%)"
+                    f"({change_sign}{price_info.change_rate:.2f}%){position_profit_str}"
                 )
 
                 # 2. DB 저장 (분봉 upsert)
