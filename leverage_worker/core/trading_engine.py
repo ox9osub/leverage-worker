@@ -992,12 +992,44 @@ class TradingEngine:
                 )
                 profit_rate = context.profit_rate
 
-            order_id = self._order_manager.place_sell_order(
-                stock_code=stock_code,
-                stock_name=stock_name,
-                quantity=signal.quantity,
-                strategy_name=strategy.name,
-            )
+            # 익절 여부 확인 (TP 달성 시 지정가, 그 외 시장가)
+            is_take_profit = "익절" in signal.reason
+
+            if is_take_profit and position:
+                # TP 달성: 지정가 매도 (목표 수익률 가격)
+                # 전략 설정에서 take_profit_pct 가져오기
+                take_profit_pct = 0.003  # 기본값
+                strategies = self._settings.get_stock_strategies(stock_code)
+                for strat_config in strategies:
+                    if strat_config.get("name") == strategy.name:
+                        params = strat_config.get("params", {})
+                        take_profit_pct = params.get("take_profit_pct", 0.003)
+                        break
+
+                # TP 가격 = 평균단가 × (1 + take_profit_pct)
+                tp_price = int(position.avg_price * (1 + take_profit_pct))
+
+                logger.info(
+                    f"[{stock_code}] TP 지정가 매도: {signal.quantity}주 @ {tp_price:,}원 "
+                    f"(평균단가: {position.avg_price:,}원, TP: {take_profit_pct:.2%})"
+                )
+
+                order_id = self._order_manager.place_sell_order_with_fallback(
+                    stock_code=stock_code,
+                    stock_name=stock_name,
+                    quantity=signal.quantity,
+                    strategy_name=strategy.name,
+                    limit_price=tp_price,
+                    fallback_seconds=1.0,
+                )
+            else:
+                # SL/Timeout/Overnight: 시장가 매도
+                order_id = self._order_manager.place_sell_order(
+                    stock_code=stock_code,
+                    stock_name=stock_name,
+                    quantity=signal.quantity,
+                    strategy_name=strategy.name,
+                )
 
             if order_id:
                 self._slack.notify_sell(
@@ -1021,6 +1053,82 @@ class TradingEngine:
 
         # 포지션 동기화
         self._position_manager.sync_with_broker()
+
+        # Overnight 포지션 처리
+        self._process_overnight_positions()
+
+    def _process_overnight_positions(self) -> None:
+        """
+        Overnight 포지션 처리
+
+        전략별 overnight_action 설정에 따라:
+        - "timeout": 장 시작 시 시장가 매도
+        - "hold": 포지션 유지, 일반 TP/SL 체크 계속
+        """
+        positions = self._position_manager.get_all_positions()
+
+        if not positions:
+            logger.info("Overnight 포지션 없음")
+            return
+
+        logger.info(f"Overnight 포지션 {len(positions)}개 확인")
+
+        for pos in positions:
+            stock_code = pos.stock_code
+            strategy_name = pos.strategy_name
+
+            if not strategy_name:
+                logger.warning(f"[{stock_code}] 전략 미지정 포지션 - 스킵")
+                continue
+
+            # 전략 설정에서 overnight_action 가져오기
+            overnight_action = "hold"  # 기본값
+            strategies = self._settings.get_stock_strategies(stock_code)
+
+            for strat_config in strategies:
+                if strat_config.get("name") == strategy_name:
+                    overnight_action = strat_config.get("overnight_action", "hold")
+                    break
+
+            logger.info(
+                f"[{stock_code}] Overnight 포지션: {pos.quantity}주, "
+                f"전략: {strategy_name}, action: {overnight_action}"
+            )
+
+            if overnight_action == "timeout":
+                # 장 시작 시 시장가 매도
+                stock_config = self._settings.stocks.get(stock_code)
+                stock_name = stock_config.name if stock_config else stock_code
+
+                logger.info(f"[{stock_code}] Overnight timeout → 시장가 매도")
+
+                order_id = self._order_manager.place_sell_order(
+                    stock_code=stock_code,
+                    stock_name=stock_name,
+                    quantity=pos.quantity,
+                    strategy_name=strategy_name,
+                )
+
+                if order_id:
+                    # 수익률 계산
+                    profit_rate = 0.0
+                    if pos.avg_price > 0 and pos.current_price > 0:
+                        profit_rate = (pos.current_price - pos.avg_price) / pos.avg_price * 100
+
+                    self._slack.notify_sell(
+                        stock_code=stock_code,
+                        stock_name=stock_name,
+                        quantity=pos.quantity,
+                        price=pos.current_price,
+                        profit_loss=int((pos.current_price - pos.avg_price) * pos.quantity),
+                        profit_rate=profit_rate,
+                        strategy_name=strategy_name,
+                        reason="Overnight timeout",
+                        strategy_win_rate=self._settings.get_strategy_win_rate(
+                            stock_code, strategy_name
+                        ),
+                    )
+            # else "hold": 포지션 유지, 일반 TP/SL 체크 계속
 
     def _on_market_close(self) -> None:
         """장 마감 콜백"""

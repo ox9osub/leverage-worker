@@ -24,7 +24,8 @@
       "Bash(powershell -Command \"Copy-Item ''c:\\\\Users\\\\suble\\\\Desktop\\\\work\\\\project\\\\kis-trader\\\\data\\\\ml_models\\\\volatility_direction_price_position_20260118.pkl'' ''c:\\\\Users\\\\suble\\\\Desktop\\\\work\\\\project\\\\leverage-worker\\\\data\\\\ml_models\\\\''\")",
       "Bash(powershell -Command \"Get-ChildItem ''c:\\\\Users\\\\suble\\\\Desktop\\\\work\\\\project\\\\leverage-worker\\\\data\\\\ml_models\\\\''\")",
       "Bash(powershell -Command \"cd ''c:\\\\Users\\\\suble\\\\Desktop\\\\work\\\\project\\\\leverage-worker''; python -c \"\"from leverage_worker.ml import TradingFeatureEngineer, SignalConfig, VolatilityDirectionSignalGenerator; print\\(''ML module import: OK''\\)\"\"\")",
-      "Bash(powershell -Command:*)"
+      "Bash(powershell -Command:*)",
+      "Bash(grep:*)"
     ],
     "deny": [],
     "ask": []

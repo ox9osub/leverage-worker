@@ -530,6 +530,200 @@ class OrderManager:
 
         return result.order_id
 
+    def place_sell_order_with_fallback(
+        self,
+        stock_code: str,
+        stock_name: str,
+        quantity: int,
+        strategy_name: Optional[str],
+        limit_price: int,
+        fallback_seconds: float = 1.0,
+    ) -> Optional[str]:
+        """
+        지정가 매도 주문 후 미체결 시 시장가로 전환
+
+        TP 달성 시 사용: 지정가로 먼저 시도 후 빠르게 시장가 전환
+
+        Args:
+            stock_code: 종목코드
+            stock_name: 종목명
+            quantity: 수량
+            strategy_name: 전략 이름
+            limit_price: 지정가 (TP 목표가)
+            fallback_seconds: 미체결 대기 시간 (초)
+
+        Returns:
+            주문 ID 또는 None (실패 시)
+        """
+        import time
+
+        # 중복 주문 체크
+        if stock_code in self._pending_stocks:
+            logger.warning(f"[{stock_code}] 매도 주문 차단: 중복 주문 (pending 상태의 주문 존재)")
+            self._audit.log_order(
+                event_type="ORDER_REJECTED",
+                module="OrderManager",
+                stock_code=stock_code,
+                stock_name=stock_name,
+                order_id=None,
+                side="SELL",
+                quantity=quantity,
+                price=limit_price,
+                strategy_name=strategy_name or "",
+                status="rejected",
+                reason="duplicate_order_blocked",
+            )
+            return None
+
+        # 1. 지정가 매도 주문 실행
+        logger.info(
+            f"[{stock_code}] 지정가 매도 시작: {quantity}주 @ {limit_price:,}원 "
+            f"(fallback: {fallback_seconds}초)"
+        )
+
+        result = self._broker.place_limit_order(stock_code, OrderSide.SELL, quantity, limit_price)
+
+        if not result.success:
+            logger.error(f"[{stock_code}] 지정가 매도 실패: {result.message}")
+            self._audit.log_order(
+                event_type="ORDER_REJECTED",
+                module="OrderManager",
+                stock_code=stock_code,
+                stock_name=stock_name,
+                order_id=None,
+                side="SELL",
+                quantity=quantity,
+                price=limit_price,
+                strategy_name=strategy_name or "",
+                status="rejected",
+                reason=f"broker_rejected: {result.message}",
+            )
+            return None
+
+        order_id = result.order_id
+
+        # 주문 등록
+        order = ManagedOrder(
+            order_id=order_id,
+            stock_code=stock_code,
+            stock_name=stock_name,
+            side=OrderSide.SELL,
+            quantity=quantity,
+            price=limit_price,
+            strategy_name=strategy_name,
+            state=OrderState.SUBMITTED,
+        )
+        self._active_orders[order_id] = order
+        self._pending_stocks.add(stock_code)
+
+        # DB 저장
+        self._save_order_to_db(order)
+
+        # 감사 로그 기록
+        self._audit.log_order(
+            event_type="ORDER_SUBMIT",
+            module="OrderManager",
+            stock_code=stock_code,
+            stock_name=stock_name,
+            order_id=order_id,
+            side="SELL",
+            quantity=quantity,
+            price=limit_price,
+            strategy_name=strategy_name or "",
+            status="submitted",
+            reason="limit_order_with_fallback",
+        )
+
+        # 2. 대기
+        time.sleep(fallback_seconds)
+
+        # 3. 체결 상태 확인
+        filled_qty, unfilled_qty = self._broker.get_order_status(order_id)
+
+        if unfilled_qty == 0:
+            # 전량 체결 완료
+            logger.info(f"[{stock_code}] 지정가 매도 전량 체결: {filled_qty}주 @ {limit_price:,}원")
+            return order_id
+
+        # 4. 미체결 있음 → 취소 후 시장가 전환
+        logger.info(
+            f"[{stock_code}] 지정가 매도 미체결: {unfilled_qty}주 → 시장가 전환"
+        )
+
+        # 기존 주문 취소
+        if not self._broker.cancel_order(order_id):
+            logger.warning(f"[{stock_code}] 지정가 주문 취소 실패, 체결 재확인")
+            # 취소 실패 시 체결 상태 재확인
+            filled_qty, unfilled_qty = self._broker.get_order_status(order_id)
+            if unfilled_qty == 0:
+                logger.info(f"[{stock_code}] 취소 실패했으나 전량 체결됨")
+                return order_id
+
+        # pending 상태 해제 (시장가 재주문을 위해)
+        self._pending_stocks.discard(stock_code)
+        if order_id in self._active_orders:
+            del self._active_orders[order_id]
+
+        # 미체결 수량만큼 시장가 매도
+        logger.info(f"[{stock_code}] 시장가 매도 전환: {unfilled_qty}주")
+
+        market_result = self._broker.place_market_order(stock_code, OrderSide.SELL, unfilled_qty)
+
+        if not market_result.success:
+            logger.error(f"[{stock_code}] 시장가 매도 전환 실패: {market_result.message}")
+            self._audit.log_order(
+                event_type="ORDER_REJECTED",
+                module="OrderManager",
+                stock_code=stock_code,
+                stock_name=stock_name,
+                order_id=None,
+                side="SELL",
+                quantity=unfilled_qty,
+                price=0,
+                strategy_name=strategy_name or "",
+                status="rejected",
+                reason=f"market_fallback_failed: {market_result.message}",
+            )
+            return order_id  # 부분 체결된 지정가 주문 ID 반환
+
+        # 시장가 주문 등록
+        market_order = ManagedOrder(
+            order_id=market_result.order_id,
+            stock_code=stock_code,
+            stock_name=stock_name,
+            side=OrderSide.SELL,
+            quantity=unfilled_qty,
+            price=market_result.price,
+            strategy_name=strategy_name,
+            state=OrderState.SUBMITTED,
+        )
+        self._active_orders[market_result.order_id] = market_order
+        self._pending_stocks.add(stock_code)
+
+        # DB 저장
+        self._save_order_to_db(market_order)
+
+        # 감사 로그 기록
+        self._audit.log_order(
+            event_type="ORDER_SUBMIT",
+            module="OrderManager",
+            stock_code=stock_code,
+            stock_name=stock_name,
+            order_id=market_result.order_id,
+            side="SELL",
+            quantity=unfilled_qty,
+            price=market_result.price,
+            strategy_name=strategy_name or "",
+            status="submitted",
+            reason="market_fallback_from_limit",
+        )
+
+        logger.info(
+            f"[{stock_code}] 시장가 매도 전환 완료: {unfilled_qty}주 (ID: {market_result.order_id})"
+        )
+
+        return market_result.order_id
+
     def check_fills(self) -> List[ManagedOrder]:
         """
         체결 확인 및 포지션 업데이트
