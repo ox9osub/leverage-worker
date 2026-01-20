@@ -254,6 +254,189 @@ class OrderManager:
 
         return result.order_id
 
+    def place_buy_order_with_chase(
+        self,
+        stock_code: str,
+        stock_name: str,
+        quantity: int,
+        deposit: int,
+        strategy_name: str,
+        interval: float = 0.5,
+        max_retry: int = 10,
+    ) -> Optional[str]:
+        """
+        매도호가1 추격 매수 (지정가 주문 + 반복 정정)
+
+        - 0.5초마다 미체결 확인
+        - 매도호가1로 정정 (최대 10회)
+        - 가격 상승 시 수량 자동 조정
+
+        Args:
+            stock_code: 종목코드
+            stock_name: 종목명
+            quantity: 목표 수량
+            deposit: 사용 가능 예수금
+            strategy_name: 전략 이름
+            interval: 정정 간격 (초)
+            max_retry: 최대 정정 횟수
+
+        Returns:
+            주문 ID 또는 None (실패 시)
+        """
+        import time
+
+        # 중복 주문 체크
+        if stock_code in self._pending_stocks:
+            logger.warning(f"[{stock_code}] 매수 주문 차단: 중복 주문 (pending 상태의 주문 존재)")
+            return None
+
+        # 1. 매도호가1 조회
+        ask_price = self._broker.get_asking_price(stock_code)
+        if not ask_price or ask_price <= 0:
+            logger.error(f"[{stock_code}] 매수 주문 차단: 매도호가1 조회 실패")
+            return None
+
+        # 2. 초기 수량 계산 (예수금 기준)
+        max_qty_by_deposit = deposit // ask_price
+        order_qty = min(quantity, max_qty_by_deposit)
+
+        if order_qty < 1:
+            logger.warning(f"[{stock_code}] 매수 주문 차단: 예수금 부족 (예수금: {deposit:,}, 호가: {ask_price:,})")
+            return None
+
+        logger.info(
+            f"[{stock_code}] 지정가 매수 시작: {order_qty}주 @ {ask_price:,}원 "
+            f"(예수금: {deposit:,}원)"
+        )
+
+        # 3. 지정가 주문 실행
+        result = self._broker.place_limit_order(stock_code, OrderSide.BUY, order_qty, ask_price)
+
+        if not result.success:
+            logger.error(f"[{stock_code}] 지정가 매수 실패: {result.message}")
+            return None
+
+        order_id = result.order_id
+        order_branch = result.order_branch
+
+        # 주문 등록
+        order = ManagedOrder(
+            order_id=order_id,
+            stock_code=stock_code,
+            stock_name=stock_name,
+            side=OrderSide.BUY,
+            quantity=order_qty,
+            price=ask_price,
+            strategy_name=strategy_name,
+            state=OrderState.SUBMITTED,
+        )
+        self._active_orders[order_id] = order
+        self._pending_stocks.add(stock_code)
+
+        # DB 저장
+        self._save_order_to_db(order)
+
+        # 감사 로그 기록
+        self._audit.log_order(
+            event_type="ORDER_SUBMIT",
+            module="OrderManager",
+            stock_code=stock_code,
+            stock_name=stock_name,
+            order_id=order_id,
+            side="BUY",
+            quantity=order_qty,
+            price=ask_price,
+            strategy_name=strategy_name,
+            status="submitted",
+        )
+
+        # 4. 반복 정정 루프
+        total_filled = 0
+        current_price = ask_price
+
+        for retry in range(max_retry):
+            time.sleep(interval)  # 대기
+
+            # 체결 상태 확인
+            filled_qty, unfilled_qty = self._broker.get_order_status(order_id)
+            total_filled = filled_qty
+
+            if unfilled_qty == 0:
+                # 전량 체결 완료
+                logger.info(f"[{stock_code}] 전량 체결 완료: {total_filled}주")
+                break
+
+            # 미체결 있음 → 매도호가1 재조회
+            new_ask_price = self._broker.get_asking_price(stock_code)
+            if not new_ask_price or new_ask_price <= 0:
+                logger.warning(f"[{stock_code}] 매도호가1 재조회 실패, 대기")
+                continue
+
+            # 가격 변동 시에만 정정
+            if new_ask_price == current_price:
+                logger.debug(f"[{stock_code}] 가격 변동 없음, 대기 (미체결: {unfilled_qty}주)")
+                continue
+
+            # 가격 상승 시 수량 재계산
+            if new_ask_price > current_price:
+                # 남은 예수금 = 초기 예수금 - (체결수량 * 체결가격들의 합)
+                # 간소화: 체결수량 * 현재 기준가격으로 계산
+                used_amount = total_filled * current_price
+                remaining_deposit = deposit - used_amount
+
+                # 새 가격으로 주문 가능한 수량
+                affordable_qty = remaining_deposit // new_ask_price
+                new_order_qty = min(unfilled_qty, affordable_qty)
+
+                if new_order_qty < unfilled_qty:
+                    logger.info(
+                        f"[{stock_code}] 가격 상승으로 수량 조정: "
+                        f"{unfilled_qty}주 → {new_order_qty}주 "
+                        f"(가격: {current_price:,} → {new_ask_price:,})"
+                    )
+            else:
+                new_order_qty = unfilled_qty
+
+            if new_order_qty <= 0:
+                logger.warning(f"[{stock_code}] 예수금 부족으로 추가 매수 불가")
+                break
+
+            # 정정 직전 체결 상태 재확인 (race condition 방지)
+            latest_filled, latest_unfilled = self._broker.get_order_status(order_id)
+            if latest_unfilled == 0:
+                # 정정 전에 전량 체결됨
+                logger.info(f"[{stock_code}] 정정 전 전량 체결 완료: {latest_filled}주")
+                total_filled = latest_filled
+                break
+
+            # 실제 미체결 수량으로 정정 수량 조정
+            if latest_unfilled < new_order_qty:
+                logger.info(
+                    f"[{stock_code}] 체결 진행으로 수량 재조정: "
+                    f"{new_order_qty}주 → {latest_unfilled}주"
+                )
+                new_order_qty = latest_unfilled
+                total_filled = latest_filled
+
+            # 정정 주문
+            if self._broker.modify_order(order_id, order_branch, new_order_qty, new_ask_price):
+                current_price = new_ask_price
+                logger.info(
+                    f"[{stock_code}] 정정 주문 #{retry+1}: "
+                    f"{new_order_qty}주 @ {new_ask_price:,}원"
+                )
+            else:
+                logger.warning(f"[{stock_code}] 정정 주문 실패")
+
+        # 최종 상태 로그
+        final_filled, final_unfilled = self._broker.get_order_status(order_id)
+        if final_unfilled > 0:
+            logger.warning(
+                f"[{stock_code}] 매수 부분 체결: {final_filled}주 체결, {final_unfilled}주 미체결"
+            )
+
+        return order_id
+
     def place_sell_order(
         self,
         stock_code: str,

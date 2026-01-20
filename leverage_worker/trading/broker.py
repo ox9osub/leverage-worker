@@ -76,6 +76,7 @@ class OrderResult:
     side: OrderSide
     quantity: int
     price: int
+    order_branch: Optional[str] = None  # 지점번호 (정정/취소에 필요)
 
 
 @dataclass
@@ -161,6 +162,46 @@ class KISBroker:
             )
         except Exception as e:
             logger.error(f"Failed to parse price response: {e}")
+            return None
+
+    def get_asking_price(self, stock_code: str) -> Optional[int]:
+        """
+        매도호가1 (최우선 매도가) 조회
+
+        Args:
+            stock_code: 종목코드 (6자리)
+
+        Returns:
+            매도호가1 가격 또는 None
+        """
+        api_url = "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn"
+        tr_id = "FHKST01010200"
+
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",  # KRX
+            "FID_INPUT_ISCD": stock_code,
+        }
+
+        res = self._session.url_fetch(api_url, tr_id, params=params)
+        self._session.smart_sleep()
+
+        if not res.is_ok():
+            res.print_error(api_url)
+            return None
+
+        try:
+            body = res.get_body()
+            output1 = body.output1
+
+            # output1이 dict인 경우와 객체인 경우 모두 처리
+            if isinstance(output1, dict):
+                askp1 = output1.get("askp1", "0")
+            else:
+                askp1 = getattr(output1, "askp1", "0")
+
+            return int(askp1)
+        except Exception as e:
+            logger.error(f"Failed to parse asking price response: {e}")
             return None
 
     def get_balance(self) -> Tuple[List[Position], Dict[str, Any]]:
@@ -332,6 +373,105 @@ class KISBroker:
                 price=0,
             )
 
+    def place_limit_order(
+        self,
+        stock_code: str,
+        side: OrderSide,
+        quantity: int,
+        price: int,
+    ) -> OrderResult:
+        """
+        지정가 주문
+
+        Args:
+            stock_code: 종목코드
+            side: 매수/매도
+            quantity: 수량
+            price: 지정가
+
+        Returns:
+            OrderResult 객체
+        """
+        api_url = "/uapi/domestic-stock/v1/trading/order-cash"
+
+        # TR ID 설정 (매수/매도)
+        if side == OrderSide.BUY:
+            tr_id = "TTTC0802U"
+        else:
+            tr_id = "TTTC0801U"
+
+        params = {
+            "CANO": self._account_no,
+            "ACNT_PRDT_CD": self._account_prod,
+            "PDNO": stock_code,
+            "ORD_DVSN": "00",  # 지정가
+            "ORD_QTY": str(quantity),
+            "ORD_UNPR": str(price),  # 지정가
+            "EXCG_ID_DVSN_CD": "KRX",
+        }
+
+        # 매도 시 추가 파라미터
+        if side == OrderSide.SELL:
+            params["SLL_TYPE"] = "01"  # 일반매도
+
+        res = self._session.url_fetch(api_url, tr_id, params=params, post_flag=True)
+        self._session.smart_sleep()
+
+        if not res.is_ok():
+            error_msg = res.get_error_message()
+            logger.error(f"Limit order failed: {side.value} {stock_code} x {quantity} @ {price} - {error_msg}")
+            return OrderResult(
+                success=False,
+                order_id=None,
+                message=error_msg,
+                stock_code=stock_code,
+                side=side,
+                quantity=quantity,
+                price=price,
+            )
+
+        try:
+            body = res.get_body()
+            output = body.output
+
+            # output이 딕셔너리인 경우와 namedtuple인 경우 모두 처리
+            if isinstance(output, dict):
+                order_id = output.get("ODNO", "")
+                order_time = output.get("ORD_TMD", "")
+                order_branch = output.get("KRX_FWDG_ORD_ORGNO", "")
+            else:
+                order_id = getattr(output, "ODNO", "")
+                order_time = getattr(output, "ORD_TMD", "")
+                order_branch = getattr(output, "KRX_FWDG_ORD_ORGNO", "")
+
+            logger.info(
+                f"Limit order placed: {side.value} {stock_code} x {quantity} @ {price} - "
+                f"OrderID: {order_id}, Time: {order_time}"
+            )
+
+            return OrderResult(
+                success=True,
+                order_id=order_id,
+                message="Order placed successfully",
+                stock_code=stock_code,
+                side=side,
+                quantity=quantity,
+                price=price,
+                order_branch=order_branch,
+            )
+
+        except Exception as e:
+            logger.error(f"Failed to parse order response: {e}")
+            return OrderResult(
+                success=False,
+                order_id=None,
+                message=str(e),
+                stock_code=stock_code,
+                side=side,
+                quantity=quantity,
+                price=price,
+            )
+
     def cancel_order(
         self,
         order_id: str,
@@ -375,6 +515,52 @@ class KISBroker:
         logger.info(f"Order cancelled: {order_id}")
         return True
 
+    def modify_order(
+        self,
+        order_id: str,
+        order_branch: str,
+        quantity: int,
+        new_price: int,
+    ) -> bool:
+        """
+        주문 정정 (가격/수량 변경)
+
+        Args:
+            order_id: 주문번호
+            order_branch: 지점번호
+            quantity: 정정 수량
+            new_price: 정정 가격
+
+        Returns:
+            성공 여부
+        """
+        api_url = "/uapi/domestic-stock/v1/trading/order-rvsecncl"
+        tr_id = "TTTC0803U"
+
+        params = {
+            "CANO": self._account_no,
+            "ACNT_PRDT_CD": self._account_prod,
+            "KRX_FWDG_ORD_ORGNO": order_branch,
+            "ORGN_ODNO": order_id,
+            "ORD_DVSN": "00",  # 지정가
+            "RVSE_CNCL_DVSN_CD": "01",  # 정정
+            "ORD_QTY": str(quantity),
+            "ORD_UNPR": str(new_price),  # 정정 가격
+            "QTY_ALL_ORD_YN": "N",  # 수량 지정
+            "EXCG_ID_DVSN_CD": "KRX",
+        }
+
+        res = self._session.url_fetch(api_url, tr_id, params=params, post_flag=True)
+        self._session.smart_sleep()
+
+        if not res.is_ok():
+            error_msg = res.get_error_message()
+            logger.error(f"Order modify failed: {order_id} - {error_msg}")
+            return False
+
+        logger.info(f"Order modified: {order_id} -> {quantity}주 @ {new_price:,}원")
+        return True
+
     def get_pending_orders(self) -> List[OrderInfo]:
         """
         미체결 주문 조회
@@ -383,6 +569,28 @@ class KISBroker:
             미체결 주문 리스트
         """
         return self._get_orders(filled_only=False)
+
+    def get_order_status(self, order_id: str) -> Tuple[int, int]:
+        """
+        주문의 체결/미체결 수량 조회
+
+        Args:
+            order_id: 주문번호
+
+        Returns:
+            (체결수량, 미체결수량) 튜플
+        """
+        # 전체 주문 조회 (체결 + 미체결)
+        orders = self._get_orders(all_orders=True)
+
+        for order in orders:
+            if order.order_id == order_id:
+                unfilled_qty = order.order_qty - order.filled_qty
+                return (order.filled_qty, unfilled_qty)
+
+        # 주문을 찾지 못한 경우 (전량 체결 등)
+        logger.warning(f"Order not found: {order_id}")
+        return (0, 0)
 
     def get_today_orders(self) -> List[OrderInfo]:
         """

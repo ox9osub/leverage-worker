@@ -905,11 +905,11 @@ class TradingEngine:
             win_rate = self._settings.get_strategy_win_rate(stock_code, strategy.name)
             allocation = self._settings.get_strategy_allocation(stock_code, strategy.name)
 
-            # 매수 수량 계산: 예수금 98.5% 기준
+            # 매수 수량 계산: 예수금 99.9% 기준 (지정가 주문이므로 100% 근접 사용 가능)
             deposit = self._broker.get_deposit()
             if deposit > 0 and context.current_price > 0:
-                # 예수금의 98.5% 사용
-                available_amount = int(deposit * 0.985)
+                # 예수금의 99.9% 사용
+                available_amount = int(deposit * 0.999)
                 max_qty_by_deposit = available_amount // context.current_price
                 # allocation 비율 적용
                 quantity = int(max_qty_by_deposit * (allocation / 100))
@@ -918,10 +918,11 @@ class TradingEngine:
                     quantity = 1
                 logger.info(
                     f"[{stock_code}] 매수 수량 계산: {quantity}주 "
-                    f"(예수금: {deposit:,}원, 98.5%: {available_amount:,}원, allocation: {allocation}%)"
+                    f"(예수금: {deposit:,}원, 99.9%: {available_amount:,}원, allocation: {allocation}%)"
                 )
             else:
                 quantity = signal.quantity
+                available_amount = 0
                 logger.warning(f"[{stock_code}] 예수금 조회 실패 → 시그널 수량 사용: {quantity}주")
 
             # 시그널 알림 (주문 전)
@@ -936,15 +937,19 @@ class TradingEngine:
                 strategy_win_rate=win_rate,
             )
 
-            order_id = self._order_manager.place_buy_order(
+            # 지정가 추격 매수 (매도호가1로 주문 + 0.5초마다 정정)
+            order_id = self._order_manager.place_buy_order_with_chase(
                 stock_code=stock_code,
                 stock_name=stock_name,
                 quantity=quantity,
+                deposit=available_amount,
                 strategy_name=strategy.name,
+                interval=0.5,
+                max_retry=10,
             )
 
             if order_id:
-                logger.info(f"[{stock_code}] 매수 주문 성공: {order_id}")
+                logger.info(f"[{stock_code}] 지정가 추격 매수 완료: {order_id}")
                 self._slack.notify_buy(
                     stock_code=stock_code,
                     stock_name=stock_name,
@@ -955,44 +960,7 @@ class TradingEngine:
                     strategy_win_rate=win_rate,
                 )
             else:
-                # 주문 실패 → 증거금률 기준으로 재시도
-                logger.warning(f"[{stock_code}] 예수금 98.5% 주문 실패 → 증거금률 기준 재시도")
-                self._slack.send_message(
-                    f"{self._slack._get_mode_prefix()}[주문재시도]\n"
-                    f"{stock_name}({stock_code}) 예수금 98.5% 주문 실패\n"
-                    f"증거금률 기준으로 재시도합니다."
-                )
-
-                # get_buyable_quantity API로 안전한 수량 조회
-                safe_qty = self._broker.get_buyable_quantity(stock_code)
-                if safe_qty > 0:
-                    retry_qty = int(safe_qty * (allocation / 100))
-                    if retry_qty < 1:
-                        retry_qty = 1
-                    logger.info(f"[{stock_code}] 재시도 수량: {retry_qty}주 (증거금률 반영)")
-
-                    order_id = self._order_manager.place_buy_order(
-                        stock_code=stock_code,
-                        stock_name=stock_name,
-                        quantity=retry_qty,
-                        strategy_name=strategy.name,
-                    )
-
-                    if order_id:
-                        logger.info(f"[{stock_code}] 재시도 매수 주문 성공: {order_id}")
-                        self._slack.notify_buy(
-                            stock_code=stock_code,
-                            stock_name=stock_name,
-                            quantity=retry_qty,
-                            price=context.current_price,
-                            strategy_name=strategy.name,
-                            reason=signal.reason,
-                            strategy_win_rate=win_rate,
-                        )
-                    else:
-                        logger.error(f"[{stock_code}] 재시도 매수 주문도 실패")
-                else:
-                    logger.error(f"[{stock_code}] 증거금률 기준 수량 조회 실패")
+                logger.error(f"[{stock_code}] 지정가 추격 매수 실패")
 
         elif signal.is_sell:
             # 매도 시그널
