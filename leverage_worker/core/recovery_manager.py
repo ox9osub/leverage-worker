@@ -83,7 +83,10 @@ class RecoveryManager:
 
         try:
             with open(self._state_file, encoding="utf-8") as f:
-                data = json.load(f)
+                content = f.read().strip()
+                if not content:
+                    return None
+                data = json.loads(content)
 
             state = SessionState(
                 session_id=data.get("session_id", ""),
@@ -134,7 +137,9 @@ class RecoveryManager:
             crash_logs = []
             if self._crash_log_file.exists():
                 with open(self._crash_log_file, encoding="utf-8") as f:
-                    crash_logs = json.load(f)
+                    content = f.read().strip()
+                    if content:
+                        crash_logs = json.loads(content)
 
             crash_entry = {
                 "detected_at": datetime.now().isoformat(),
@@ -213,7 +218,9 @@ class RecoveryManager:
             existing = {}
             if self._state_file.exists():
                 with open(self._state_file, encoding="utf-8") as f:
-                    existing = json.load(f)
+                    content = f.read().strip()
+                    if content:
+                        existing = json.loads(content)
 
             now = datetime.now().isoformat()
 
@@ -249,7 +256,10 @@ class RecoveryManager:
 
         try:
             with open(self._crash_log_file, encoding="utf-8") as f:
-                crash_logs = json.load(f)
+                content = f.read().strip()
+                if not content:
+                    return []
+                crash_logs = json.loads(content)
             return list(reversed(crash_logs[-limit:]))
         except Exception as e:
             logger.error(f"Failed to read crash logs: {e}")
