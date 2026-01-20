@@ -193,7 +193,7 @@ class MinuteCandleRepository:
     def get_recent_prices(
         self,
         stock_code: str,
-        count: int = 60,
+        count: int = 500,
         before_minute_key: Optional[str] = None,
     ) -> List[MinuteCandle]:
         """

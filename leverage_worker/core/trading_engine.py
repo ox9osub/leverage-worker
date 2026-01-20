@@ -912,7 +912,7 @@ class TradingEngine:
                     return
 
                 # 가격 히스토리 로드 (분봉)
-                price_history = self._price_repo.get_recent_prices(stock_code, count=60)
+                price_history = self._price_repo.get_recent_prices(stock_code, count=500)
 
                 # 일봉 데이터 로드 (캐시에서)
                 daily_candles = self._daily_candles_cache.get(stock_code, [])
@@ -1031,7 +1031,7 @@ class TradingEngine:
                     return
 
                 # 가격 히스토리 로드 (분봉)
-                price_history = self._price_repo.get_recent_prices(stock_code, count=60)
+                price_history = self._price_repo.get_recent_prices(stock_code, count=500)
 
                 # 일봉 데이터 로드 (캐시에서)
                 daily_candles = self._daily_candles_cache.get(stock_code, [])
