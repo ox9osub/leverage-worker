@@ -113,7 +113,14 @@ class PositionManager:
 
         try:
             # 브로커에서 잔고 조회 (락 밖에서 수행 - 네트워크 호출)
-            broker_positions, _ = self._broker.get_balance()
+            broker_positions, summary = self._broker.get_balance()
+
+            # API 실패 시 동기화 중단 (포지션 삭제 방지)
+            # summary가 비어있으면 API 호출 자체가 실패한 것
+            if not summary:
+                logger.warning("Broker balance query failed, skipping sync to preserve positions")
+                return
+
             broker_codes = {p.stock_code for p in broker_positions}
 
             # 락 내에서 포지션 업데이트

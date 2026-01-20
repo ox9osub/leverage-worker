@@ -822,7 +822,8 @@ class TradingEngine:
                         continue
 
                     # 포지션 보유 시 해당 전략으로만 매도 가능
-                    if position and position.strategy_name != strategy_name:
+                    # (unmanaged 포지션은 첫 번째 매칭 전략이 처리)
+                    if position and position.strategy_name is not None and position.strategy_name != strategy_name:
                         continue
 
                     # 전략 컨텍스트 생성
