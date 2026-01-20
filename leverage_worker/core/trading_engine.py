@@ -324,14 +324,24 @@ class TradingEngine:
             # 6. 복구 관리자 세션 종료 (정상 종료 기록)
             self._recovery_manager.stop_session()
 
-            # 7. DB 연결 종료
+            # 7. 일일 리포트 생성 및 전송 (DB 종료 전)
+            try:
+                report = self._report_generator.generate_and_send()
+                logger.info(
+                    f"Daily report on stop: {report.total_trades} trades, "
+                    f"PnL: {report.realized_pnl:,}원"
+                )
+            except Exception as e:
+                logger.error(f"Daily report error on stop: {e}")
+
+            # 8. DB 연결 종료
             self._market_db.close_all()
             self._trading_db.close_all()
 
-            # 8. 시그널 요약 전송
+            # 9. 시그널 요약 전송
             self._slack.send_signal_summary()
 
-            # 9. Slack 종료 알림
+            # 10. Slack 종료 알림
             self._slack.notify_stop()
 
             logger.info("TradingEngine stopped")

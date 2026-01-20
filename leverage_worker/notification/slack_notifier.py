@@ -411,14 +411,33 @@ class SlackNotifier:
         trades = report.get("trades", [])
         if trades:
             lines.append("---")
-            for t in trades[:10]:  # 최대 10건
-                sign = "+" if t.get("profit_loss", 0) >= 0 else ""
-                lines.append(
-                    f"{t['stock_name']} {t['side']} {t['quantity']}주 @ {t['price']:,}원"
-                )
+            for t in trades:
+                # 거래 시간 추출 (HH:MM:SS)
+                order_time = t.get("order_time", "")
+                if order_time:
+                    # datetime 객체인 경우와 문자열인 경우 모두 처리
+                    if hasattr(order_time, "strftime"):
+                        time_str = order_time.strftime("%H:%M:%S")
+                    else:
+                        # 문자열인 경우 "YYYY-MM-DD HH:MM:SS" 형식에서 시간 추출
+                        time_str = str(order_time)[11:19] if len(str(order_time)) >= 19 else ""
+                else:
+                    time_str = ""
 
-            if len(trades) > 10:
-                lines.append(f"... 외 {len(trades) - 10}건")
+                time_prefix = f"[{time_str}] " if time_str else ""
+
+                if t["side"] == "sell":
+                    pnl = t.get("profit_loss", 0)
+                    rate = t.get("profit_rate", 0.0)
+                    pnl_sign = "+" if pnl >= 0 else ""
+                    lines.append(
+                        f"{time_prefix}{t['stock_name']} sell {t['quantity']}주 "
+                        f"@ {t['price']:,}원 ({pnl_sign}{pnl:,}원, {pnl_sign}{rate:.2f}%)"
+                    )
+                else:
+                    lines.append(
+                        f"{time_prefix}{t['stock_name']} buy {t['quantity']}주 @ {t['price']:,}원"
+                    )
 
         # 보유 포지션 (있으면)
         positions = report.get("positions", [])

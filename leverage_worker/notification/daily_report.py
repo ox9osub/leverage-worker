@@ -166,10 +166,11 @@ class DailyReportGenerator:
             else:
                 report.sell_trades += 1
 
-                # 매도 손익 계산 (간단 버전: 직전 매수가와 비교)
-                # 실제로는 포지션 히스토리를 봐야 정확
-                pnl = self._calculate_trade_pnl(row)
+                # 매도 손익 계산 (가중평균 매입가 기준)
+                pnl, avg_cost = self._calculate_trade_pnl(row)
                 trade.profit_loss = pnl
+                if avg_cost > 0:
+                    trade.profit_rate = ((row["filled_price"] - avg_cost) / avg_cost) * 100
 
                 if pnl > 0:
                     report.win_trades += 1
@@ -218,7 +219,7 @@ class DailyReportGenerator:
 
         return report
 
-    def _calculate_trade_pnl(self, sell_order: dict) -> int:
+    def _calculate_trade_pnl(self, sell_order: dict) -> tuple[int, float]:
         """
         매도 거래의 손익 계산
 
@@ -226,6 +227,9 @@ class DailyReportGenerator:
         - 매도 시점까지의 모든 매수 주문을 조회
         - 가중평균 매입가 계산
         - (매도가 - 평균매입가) × 수량
+
+        Returns:
+            (손익(원), 평균매입가) 튜플
         """
         stock_code = sell_order["stock_code"]
         sell_price = sell_order["filled_price"]
@@ -243,7 +247,7 @@ class DailyReportGenerator:
         buy_orders = self._db.fetch_all(query, (stock_code, sell_time))
 
         if not buy_orders:
-            return 0
+            return (0, 0.0)
 
         # 매도 시점 이전의 모든 매도 주문도 조회 (이미 청산된 물량 계산)
         sell_query = """
@@ -271,7 +275,7 @@ class DailyReportGenerator:
             # FIFO 방식으로 이전 매도분 차감
             remaining_qty = remaining_position - prev_sell_qty
             if remaining_qty <= 0:
-                return 0
+                return (0, 0.0)
 
             remaining_position = remaining_qty
 
@@ -279,9 +283,9 @@ class DailyReportGenerator:
         if remaining_position > 0:
             avg_cost = total_cost / (remaining_position + prev_sell_qty)
             pnl = (sell_price - avg_cost) * sell_qty
-            return int(pnl)
+            return (int(pnl), avg_cost)
 
-        return 0
+        return (0, 0.0)
 
     def _calculate_trade_pnl_with_avg_cost(self, sell_order: dict, avg_cost: float) -> int:
         """
