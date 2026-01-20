@@ -1061,7 +1061,7 @@ class TradingEngine:
                     context = StrategyContext(
                         stock_code=stock_code,
                         stock_name=stock_config.name,
-                        current_price=price_info.current_price,
+                        current_price=current_price,
                         current_time=now,
                         price_history=price_history,
                         position=broker_position,
