@@ -380,7 +380,7 @@ class DailyReportGenerator:
 
         total_pnl = 0
         for row in rows:
-            pnl = self._calculate_trade_pnl(row)
+            pnl, _ = self._calculate_trade_pnl(row)
             total_pnl += pnl
 
         logger.debug(f"Today's realized PnL loaded from DB: {total_pnl:,}원")
