@@ -7,6 +7,7 @@ kis-trader에서 이식
 """
 
 from typing import Dict, Any, Optional
+import warnings
 import numpy as np
 from .base_model import BaseModel
 
@@ -66,10 +67,14 @@ class LightGBMModel(BaseModel):
         return self
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        return self.model.predict(X)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            return self.model.predict(X)
 
     def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        return self.model.predict_proba(X)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", UserWarning)
+            return self.model.predict_proba(X)
 
 
 class XGBoostModel(BaseModel):
