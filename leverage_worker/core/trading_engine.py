@@ -43,7 +43,6 @@ from leverage_worker.utils.logger import get_logger
 from leverage_worker.utils.log_constants import LogEventType
 from leverage_worker.utils.math_utils import calculate_allocation_amount
 from leverage_worker.utils.structured_logger import get_structured_logger
-from leverage_worker.utils.time_utils import get_current_minute_key
 from leverage_worker.websocket import ExitMonitor, ExitMonitorConfig, RealtimeWSClient, TickData
 
 logger = get_logger(__name__)
@@ -900,14 +899,7 @@ class TradingEngine:
                     f"({change_sign}{tick_data.change_rate:.2f}%)"
                 )
 
-                # DB 저장 (분봉 upsert)
-                minute_key = get_current_minute_key(now)
-                self._price_repo.upsert_from_api_response(
-                    stock_code=stock_code,
-                    current_price=tick_data.price,
-                    volume=tick_data.accumulated_volume,
-                    minute_key=minute_key,
-                )
+                # NOTE: DB 저장은 스케줄러(_on_stock_tick)에서 30개 분봉 단위로 처리
 
                 # 중복 주문 방지
                 if self._order_manager.has_pending_order(stock_code):
@@ -985,7 +977,7 @@ class TradingEngine:
         """
         종목 틱 콜백 (스케줄러 기반 전략용)
 
-        1. 현재가 조회
+        1. 분봉 데이터 조회 (30개)
         2. DB 저장
         3. 전략별 시그널 생성
         4. 주문 실행
@@ -994,37 +986,33 @@ class TradingEngine:
         """
         with self._tick_lock:
             try:
-                # 1. 현재가 조회
-                price_info = self._broker.get_current_price(stock_code)
-                if not price_info:
-                    logger.warning(f"Failed to get price: {stock_code}")
+                # 1. 분봉 데이터 조회 (30개)
+                candle_data = self._broker.get_minute_candles(stock_code=stock_code)
+                if not candle_data:
+                    logger.warning(f"Failed to get minute candles: {stock_code}")
                     return
 
-                # 현재가 로그 출력
+                # 2. DB 저장 (30개 분봉 upsert)
+                saved_count = self._save_minute_candles(stock_code, candle_data)
+
+                # 현재가 로그 출력 (가장 최근 분봉 기준)
+                latest_candle = candle_data[0]  # 최신순 정렬
+                current_price = latest_candle["close_price"]
+
                 stock_config = self._settings.stocks.get(stock_code)
                 stock_name = stock_config.name if stock_config else stock_code
-                change_sign = "+" if price_info.change >= 0 else ""
 
                 # 보유 포지션 수익률 계산
                 position_profit_str = ""
                 position = self._position_manager.get_position(stock_code)
                 if position and position.avg_price > 0:
-                    position_profit_rate = (price_info.current_price - position.avg_price) / position.avg_price * 100
+                    position_profit_rate = (current_price - position.avg_price) / position.avg_price * 100
                     position_sign = "+" if position_profit_rate >= 0 else ""
                     position_profit_str = f" ({position_sign}{position_profit_rate:.1f}%)"
 
                 logger.info(
-                    f"[{stock_name}] 현재가: {price_info.current_price:,}원 "
-                    f"({change_sign}{price_info.change_rate:.2f}%){position_profit_str}"
-                )
-
-                # 2. DB 저장 (분봉 upsert)
-                minute_key = get_current_minute_key(now)
-                self._price_repo.upsert_from_api_response(
-                    stock_code=stock_code,
-                    current_price=price_info.current_price,
-                    volume=price_info.volume,
-                    minute_key=minute_key,
+                    f"[{stock_name}] 현재가: {current_price:,}원 "
+                    f"(분봉 {saved_count}개 저장){position_profit_str}"
                 )
 
                 # 3. 중복 주문 방지
