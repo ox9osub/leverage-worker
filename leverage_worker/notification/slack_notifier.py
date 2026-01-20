@@ -435,8 +435,10 @@ class SlackNotifier:
                         f"@ {t['price']:,}원 ({pnl_sign}{pnl:,}원, {pnl_sign}{rate:.2f}%)"
                     )
                 else:
+                    strategy = t.get("strategy_name", "")
+                    strategy_suffix = f" ({strategy})" if strategy else ""
                     lines.append(
-                        f"{time_prefix}{t['stock_name']} buy {t['quantity']}주 @ {t['price']:,}원"
+                        f"{time_prefix}{t['stock_name']} buy {t['quantity']}주 @ {t['price']:,}원{strategy_suffix}"
                     )
 
         # 보유 포지션 (있으면)
