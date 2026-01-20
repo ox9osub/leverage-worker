@@ -44,7 +44,7 @@ from leverage_worker.utils.log_constants import LogEventType
 from leverage_worker.utils.math_utils import calculate_allocation_amount
 from leverage_worker.utils.structured_logger import get_structured_logger
 from leverage_worker.utils.time_utils import get_current_minute_key
-from leverage_worker.websocket import RealtimeWSClient, TickData
+from leverage_worker.websocket import ExitMonitor, ExitMonitorConfig, RealtimeWSClient, TickData
 
 logger = get_logger(__name__)
 structured_logger = get_structured_logger()
@@ -130,7 +130,10 @@ class TradingEngine:
         self._ws_client: Optional[RealtimeWSClient] = None
         self._ws_stock_codes: Set[str] = set()  # WebSocket 구독 종목
 
-        # 15. 동시성 제어 (스케줄러/WebSocket 공유 리소스 보호)
+        # 15. 실시간 매도 모니터링 (realtime_exit: true 전략용)
+        self._exit_monitor: Optional[ExitMonitor] = None
+
+        # 16. 동시성 제어 (스케줄러/WebSocket 공유 리소스 보호)
         self._tick_lock = threading.Lock()
 
         # 세션 ID
@@ -240,6 +243,9 @@ class TradingEngine:
             # 8-1. WebSocket 시작 (실시간 전략용)
             self._start_websocket()
 
+            # 8-2. 실시간 매도 모니터링 시작
+            self._start_exit_monitor()
+
             # 9. 스케줄러 시작
             self._running = True
             self._scheduler.start()
@@ -312,6 +318,11 @@ class TradingEngine:
             if self._ws_client:
                 self._ws_client.stop()
                 logger.info("WebSocket client stopped")
+
+            # 3-2. 실시간 매도 모니터링 중지
+            if self._exit_monitor:
+                self._exit_monitor.stop()
+                logger.info("Exit monitor stopped")
 
             # 4. 미체결 주문 취소
             if self._order_manager:
@@ -571,7 +582,7 @@ class TradingEngine:
             logger.error(f"Check fills error: {e}")
 
     def _on_order_fill(self, order: ManagedOrder, filled_qty: int) -> None:
-        """체결 콜백 - 슬랙 알림 전송"""
+        """체결 콜백 - 슬랙 알림 전송 및 ExitMonitor 등록/해제"""
         try:
             # 손익 계산 (매도인 경우)
             profit_loss = 0
@@ -592,6 +603,13 @@ class TradingEngine:
 
                 # 당일 누적 실현손익 업데이트
                 self._daily_realized_pnl += profit_loss
+
+                # 매도 체결 시 ExitMonitor 해제
+                self._unregister_position_from_exit_monitor(order.stock_code)
+
+            elif order.side == OrderSide.BUY:
+                # 매수 체결 시 ExitMonitor 등록 (realtime_exit: true인 경우)
+                self._register_position_for_exit_monitor(order, filled_qty)
 
             # 전략 승률 가져오기
             win_rate = None
@@ -652,6 +670,205 @@ class TradingEngine:
         """WebSocket 에러 콜백"""
         logger.error(f"WebSocket error: {error}")
         self._slack.notify_error("WebSocket 에러", str(error))
+
+    # ===== 실시간 매도 모니터링 (ExitMonitor) =====
+
+    def _start_exit_monitor(self) -> None:
+        """실시간 매도 모니터링 시작"""
+        self._exit_monitor = ExitMonitor(
+            on_exit_signal=self._on_exit_monitor_signal,
+        )
+        self._exit_monitor.start()
+
+        # 기존 포지션에 대해 모니터링 등록
+        self._register_existing_positions_for_exit_monitor()
+        logger.info("[ExitMonitor] Initialized")
+
+    def _register_existing_positions_for_exit_monitor(self) -> None:
+        """기존 포지션에 대해 매도 모니터링 등록"""
+        if not self._exit_monitor:
+            return
+
+        positions = self._position_manager.get_all_positions()
+        for stock_code, position in positions.items():
+            if not position.strategy_name:
+                continue
+
+            # realtime_exit: true 설정된 전략만
+            stock_config = self._settings.stocks.get(stock_code)
+            if not stock_config:
+                continue
+
+            for strategy_config in stock_config.strategies:
+                if strategy_config.get("name") != position.strategy_name:
+                    continue
+
+                # realtime_exit 확인
+                if not strategy_config.get("realtime_exit", False):
+                    continue
+
+                params = strategy_config.get("params", {})
+                config = ExitMonitorConfig(
+                    stock_code=stock_code,
+                    strategy_name=position.strategy_name,
+                    avg_price=position.avg_price,
+                    quantity=position.quantity,
+                    entry_time=position.entry_time or datetime.now(),
+                    take_profit_pct=params.get("take_profit_pct", 0.003),
+                    stop_loss_pct=params.get("stop_loss_pct", 0.01),
+                    max_holding_minutes=params.get("max_holding_minutes", 60),
+                )
+                self._exit_monitor.add_position(config)
+                logger.info(f"[ExitMonitor] Registered existing position: {stock_code}")
+                break
+
+    def _on_exit_monitor_signal(
+        self,
+        stock_code: str,
+        strategy_name: str,
+        quantity: int,
+        reason: str,
+        is_take_profit: bool,
+    ) -> None:
+        """실시간 매도 모니터링 시그널 콜백"""
+        with self._tick_lock:
+            try:
+                # 중복 주문 방지
+                if self._order_manager.has_pending_order(stock_code):
+                    logger.warning(f"[ExitMonitor] {stock_code} 미체결 주문 존재 - 스킵")
+                    return
+
+                stock_config = self._settings.stocks.get(stock_code)
+                stock_name = stock_config.name if stock_config else stock_code
+
+                position = self._position_manager.get_position(stock_code)
+                if not position:
+                    logger.warning(f"[ExitMonitor] {stock_code} 포지션 없음 - 스킵")
+                    if self._exit_monitor:
+                        self._exit_monitor.remove_position(stock_code)
+                    return
+
+                # 현재가 조회
+                price_info = self._broker.get_current_price(stock_code)
+                current_price = price_info.current_price if price_info else position.current_price
+
+                # 전략 승률 가져오기
+                win_rate = self._settings.get_strategy_win_rate(stock_code, strategy_name)
+
+                # Slack 시그널 알림
+                self._slack.notify_signal(
+                    signal_type="SELL",
+                    stock_code=stock_code,
+                    stock_name=stock_name,
+                    quantity=quantity,
+                    price=current_price,
+                    strategy_name=strategy_name,
+                    reason=f"[실시간] {reason}",
+                    strategy_win_rate=win_rate,
+                )
+
+                order_id = None
+                if is_take_profit:
+                    # TP: 지정가 매도 (1초 후 미체결 시 시장가)
+                    strategies = self._settings.get_stock_strategies(stock_code)
+                    take_profit_pct = 0.003
+                    for strat_config in strategies:
+                        if strat_config.get("name") == strategy_name:
+                            params = strat_config.get("params", {})
+                            take_profit_pct = params.get("take_profit_pct", 0.003)
+                            break
+
+                    tp_price = int(position.avg_price * (1 + take_profit_pct))
+
+                    logger.info(
+                        f"[ExitMonitor] {stock_code} TP 지정가 매도: {quantity}주 @ {tp_price:,}원"
+                    )
+
+                    order_id = self._order_manager.place_sell_order_with_fallback(
+                        stock_code=stock_code,
+                        stock_name=stock_name,
+                        quantity=quantity,
+                        strategy_name=strategy_name,
+                        limit_price=tp_price,
+                        fallback_seconds=1.0,
+                    )
+                else:
+                    # SL/Timeout: 시장가 매도
+                    logger.info(f"[ExitMonitor] {stock_code} 시장가 매도: {quantity}주")
+
+                    order_id = self._order_manager.place_sell_order(
+                        stock_code=stock_code,
+                        stock_name=stock_name,
+                        quantity=quantity,
+                        strategy_name=strategy_name,
+                    )
+
+                if order_id:
+                    # 손익 계산 및 알림
+                    profit_loss = int((current_price - position.avg_price) * quantity)
+                    profit_rate = (current_price - position.avg_price) / position.avg_price * 100
+
+                    self._slack.notify_sell(
+                        stock_code=stock_code,
+                        stock_name=stock_name,
+                        quantity=quantity,
+                        price=current_price,
+                        profit_loss=profit_loss,
+                        profit_rate=profit_rate,
+                        strategy_name=strategy_name,
+                        reason=f"[실시간] {reason}",
+                        strategy_win_rate=win_rate,
+                    )
+
+            except Exception as e:
+                logger.error(f"[ExitMonitor] Error processing exit signal: {e}")
+
+    def _register_position_for_exit_monitor(
+        self, order: ManagedOrder, filled_qty: int
+    ) -> None:
+        """매수 체결 시 매도 모니터링 등록"""
+        if not self._exit_monitor:
+            return
+
+        if order.side != OrderSide.BUY:
+            return
+
+        if not order.strategy_name:
+            return
+
+        # realtime_exit: true 설정 확인
+        stock_config = self._settings.stocks.get(order.stock_code)
+        if not stock_config:
+            return
+
+        for strategy_config in stock_config.strategies:
+            if strategy_config.get("name") != order.strategy_name:
+                continue
+
+            if not strategy_config.get("realtime_exit", False):
+                return  # realtime_exit 비활성화
+
+            params = strategy_config.get("params", {})
+            config = ExitMonitorConfig(
+                stock_code=order.stock_code,
+                strategy_name=order.strategy_name,
+                avg_price=order.filled_price,
+                quantity=filled_qty,
+                entry_time=datetime.now(),
+                take_profit_pct=params.get("take_profit_pct", 0.003),
+                stop_loss_pct=params.get("stop_loss_pct", 0.01),
+                max_holding_minutes=params.get("max_holding_minutes", 60),
+            )
+            self._exit_monitor.add_position(config)
+            logger.info(f"[ExitMonitor] Registered: {order.stock_code}")
+            break
+
+    def _unregister_position_from_exit_monitor(self, stock_code: str) -> None:
+        """매도 체결 시 매도 모니터링 해제"""
+        if not self._exit_monitor:
+            return
+
+        self._exit_monitor.remove_position(stock_code)
 
     def _on_ws_tick(self, tick_data: TickData) -> None:
         """
@@ -878,6 +1095,24 @@ class TradingEngine:
                     # 시그널 생성
                     signal = strategy.generate_signal(context)
 
+                    # ExitMonitor가 모니터링 중인 종목의 매도 시그널은 스킵
+                    # (WebSocket에서 실시간 처리하므로 폴링 스킵)
+                    if signal.is_sell and self._exit_monitor:
+                        if self._exit_monitor.is_exit_in_progress(stock_code):
+                            logger.debug(
+                                f"[{stock_code}] 실시간 매도 진행 중 - 폴링 스킵"
+                            )
+                            continue
+                        if (
+                            self._exit_monitor.is_monitored(stock_code)
+                            and self._exit_monitor.is_ws_connected
+                        ):
+                            logger.debug(
+                                f"[{stock_code}] ExitMonitor 모니터링 중 - 폴링 스킵"
+                            )
+                            continue
+                        # WebSocket 끊김 시 → 폴링이 백업으로 처리
+
                     # 시그널 처리
                     self._process_signal(signal, context, strategy)
 
@@ -1077,6 +1312,12 @@ class TradingEngine:
         # Overnight 포지션 처리
         self._process_overnight_positions()
 
+        # ExitMonitor 재시작 (포지션 있으면 WebSocket 연결)
+        if self._exit_monitor:
+            self._exit_monitor.start()
+            self._register_existing_positions_for_exit_monitor()
+            logger.info("[ExitMonitor] Restarted on market open")
+
     def _process_overnight_positions(self) -> None:
         """
         Overnight 포지션 처리
@@ -1157,14 +1398,19 @@ class TradingEngine:
             cancelled = self._order_manager.cancel_all_pending()
             logger.info(f"Cancelled {cancelled} pending orders at market close")
 
-            # 2. 일일 리포트 생성 및 전송
+            # 2. ExitMonitor WebSocket 연결 해제 (장외 리소스 절약)
+            if self._exit_monitor:
+                self._exit_monitor.stop()
+                logger.info("[ExitMonitor] Stopped on market close")
+
+            # 3. 일일 리포트 생성 및 전송
             report = self._report_generator.generate_and_send()
             logger.info(
                 f"Daily report: {report.total_trades} trades, "
                 f"PnL: {report.realized_pnl:,}원"
             )
 
-            # 3. 시그널 요약 전송
+            # 4. 시그널 요약 전송
             self._slack.send_signal_summary()
 
         except Exception as e:

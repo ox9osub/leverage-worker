@@ -154,27 +154,43 @@ class MLMomentumStrategy(BaseStrategy):
     def _check_exit_condition(self, context: StrategyContext) -> TradingSignal:
         """
         청산 조건 확인 (TP/SL/시간)
+
+        H-L 범위 체크: 분봉의 고가/저가로 60초 사이 터치 여부 확인
         """
         stock_code = context.stock_code
-        profit_rate = context.profit_rate / 100  # % → 소수
+        avg_price = context.avg_price
 
-        # 손절 (우선 확인)
-        if profit_rate <= -self._stop_loss_pct:
+        # TP/SL 가격 계산
+        tp_price = avg_price * (1 + self._take_profit_pct)
+        sl_price = avg_price * (1 - self._stop_loss_pct)
+
+        # 최신 분봉의 H/L 가져오기 (폴링 백업용)
+        candle_high = context.current_price
+        candle_low = context.current_price
+        if context.price_history:
+            latest_candle = context.price_history[-1]
+            candle_high = latest_candle.high_price
+            candle_low = latest_candle.low_price
+
+        # 손절 (우선 확인) - 분봉 저가가 SL 이하면 손절
+        if candle_low <= sl_price:
+            sl_rate = (candle_low - avg_price) / avg_price
             self._entry_time = None
             return TradingSignal.sell(
                 stock_code=stock_code,
                 quantity=context.position_quantity,
-                reason=f"손절: {profit_rate:.2%}",
+                reason=f"손절: {sl_rate:.2%} (저가 {candle_low:,} <= SL {sl_price:,.0f})",
                 confidence=1.0,
             )
 
-        # 익절
-        if profit_rate >= self._take_profit_pct:
+        # 익절 - 분봉 고가가 TP 이상이면 익절
+        if candle_high >= tp_price:
+            tp_rate = (candle_high - avg_price) / avg_price
             self._entry_time = None
             return TradingSignal.sell(
                 stock_code=stock_code,
                 quantity=context.position_quantity,
-                reason=f"익절: {profit_rate:.2%}",
+                reason=f"익절: {tp_rate:.2%} (고가 {candle_high:,} >= TP {tp_price:,.0f})",
                 confidence=1.0,
             )
 
@@ -192,6 +208,7 @@ class MLMomentumStrategy(BaseStrategy):
                     confidence=0.8,
                 )
 
+        profit_rate = context.profit_rate / 100
         return TradingSignal.hold(stock_code, f"보유 중 ({profit_rate:.2%})")
 
     def on_entry(self, context: StrategyContext, signal: TradingSignal) -> None:
