@@ -221,11 +221,12 @@ class DailyReportGenerator:
 
     def _calculate_trade_pnl(self, sell_order: dict) -> tuple[int, float]:
         """
-        매도 거래의 손익 계산
+        매도 거래의 손익 계산 (FIFO 방식)
 
-        가중평균 매입가 기준으로 계산:
+        FIFO 기준으로 계산:
         - 매도 시점까지의 모든 매수 주문을 조회
-        - 가중평균 매입가 계산
+        - 이전 매도로 청산된 물량을 FIFO로 차감
+        - 남은 포지션의 평균 매입가 계산
         - (매도가 - 평균매입가) × 수량
 
         Returns:
@@ -236,7 +237,7 @@ class DailyReportGenerator:
         sell_qty = sell_order["filled_quantity"]
         sell_time = sell_order["created_at"]
 
-        # 매도 시점 이전의 모든 매수 주문 조회
+        # 매도 시점 이전의 모든 매수 주문 조회 (시간순)
         query = """
             SELECT filled_price, filled_quantity, created_at FROM orders
             WHERE stock_code = ? AND side = 'buy' AND status = 'filled'
@@ -259,7 +260,8 @@ class DailyReportGenerator:
         prev_sells = self._db.fetch_all(sell_query, (stock_code, sell_time))
         prev_sell_qty = sum(row["filled_quantity"] for row in prev_sells) if prev_sells else 0
 
-        # 가중평균 매입가 계산 (FIFO 방식)
+        # FIFO 방식으로 이전 매도분 차감 후 남은 포지션의 평균가 계산
+        remaining_to_skip = prev_sell_qty  # 이전 매도로 청산된 수량
         remaining_position = 0
         total_cost = 0
 
@@ -267,21 +269,23 @@ class DailyReportGenerator:
             buy_qty = buy["filled_quantity"]
             buy_price = buy["filled_price"]
 
+            if remaining_to_skip > 0:
+                # FIFO: 이전 매도로 청산된 물량 차감
+                if buy_qty <= remaining_to_skip:
+                    remaining_to_skip -= buy_qty
+                    continue  # 이 매수는 전부 청산됨
+                else:
+                    # 일부만 청산됨
+                    buy_qty -= remaining_to_skip
+                    remaining_to_skip = 0
+
+            # 남은 포지션에 추가
             remaining_position += buy_qty
             total_cost += buy_qty * buy_price
 
-        # 이전 매도 물량 차감
-        if prev_sell_qty > 0:
-            # FIFO 방식으로 이전 매도분 차감
-            remaining_qty = remaining_position - prev_sell_qty
-            if remaining_qty <= 0:
-                return (0, 0.0)
-
-            remaining_position = remaining_qty
-
         # 평균 매입가 계산
         if remaining_position > 0:
-            avg_cost = total_cost / (remaining_position + prev_sell_qty)
+            avg_cost = total_cost / remaining_position
             pnl = (sell_price - avg_cost) * sell_qty
             return (int(pnl), avg_cost)
 
