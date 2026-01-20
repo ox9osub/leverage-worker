@@ -234,11 +234,19 @@ class SessionManager:
 
     def _request_new_token(self) -> bool:
         """신규 토큰 발급 요청"""
-        url = f"{self._settings.get_server_url()}/oauth2/tokenP"
+        server_url = self._settings.get_server_url()
+        url = f"{server_url}/oauth2/tokenP"
+        app_key = self._settings.app_key
+        mode = self._settings.mode.value
+
+        # AppKey 마스킹 (앞 4자리 + ... + 뒤 4자리)
+        masked_key = f"{app_key[:4]}...{app_key[-4:]}" if len(app_key) > 8 else "***"
+
+        logger.info(f"토큰 발급 요청 - 모드: {mode}, 서버: {server_url}, AppKey: {masked_key}")
 
         payload = {
             "grant_type": "client_credentials",
-            "appkey": self._settings.app_key,
+            "appkey": app_key,
             "appsecret": self._settings.app_secret,
         }
 
@@ -260,14 +268,18 @@ class SessionManager:
                     token_expired, "%Y-%m-%d %H:%M:%S"
                 )
 
-                logger.info("New token issued successfully")
+                logger.info(f"토큰 발급 성공 - 만료: {token_expired}")
                 return True
             else:
-                logger.error(f"Token request failed: {res.status_code} - {res.text}")
+                logger.error(
+                    f"토큰 발급 실패 - 모드: {mode}, 서버: {server_url}, "
+                    f"AppKey: {masked_key}, 상태코드: {res.status_code}, "
+                    f"응답: {res.text}"
+                )
                 return False
 
         except Exception as e:
-            logger.error(f"Token request error: {e}")
+            logger.error(f"토큰 요청 오류 - 모드: {mode}, 서버: {server_url}, 에러: {e}")
             return False
 
     def start_auto_refresh(self) -> None:
