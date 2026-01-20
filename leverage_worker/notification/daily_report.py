@@ -357,6 +357,31 @@ class DailyReportGenerator:
         self.send_to_slack(report)
         return report
 
+    def get_today_realized_pnl(self) -> int:
+        """
+        당일 실현손익 조회 (프로그램 재시작 시 복구용)
+
+        Returns:
+            당일 실현손익 합계 (원)
+        """
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        query = """
+            SELECT * FROM orders
+            WHERE DATE(created_at) = ? AND status = 'filled' AND side = 'sell'
+            ORDER BY created_at ASC
+        """
+
+        rows = self._db.fetch_all(query, (today,))
+
+        total_pnl = 0
+        for row in rows:
+            pnl = self._calculate_trade_pnl(row)
+            total_pnl += pnl
+
+        logger.debug(f"Today's realized PnL loaded from DB: {total_pnl:,}원")
+        return total_pnl
+
     def get_monthly_summary(self, year: int, month: int) -> Dict[str, Any]:
         """
         월별 요약 조회

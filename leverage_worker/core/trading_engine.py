@@ -136,6 +136,9 @@ class TradingEngine:
         # 세션 ID
         self._session_id = str(uuid.uuid4())[:8]
 
+        # 당일 누적 실현손익 (DB에서 복구 - 장중 재시작 대응)
+        self._daily_realized_pnl: int = self._report_generator.get_today_realized_pnl()
+
         # 시그널 핸들러
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
@@ -577,6 +580,9 @@ class TradingEngine:
                             * 100
                         )
 
+                # 당일 누적 실현손익 업데이트
+                self._daily_realized_pnl += profit_loss
+
             # 전략 승률 가져오기
             win_rate = None
             if order.strategy_name:
@@ -594,6 +600,7 @@ class TradingEngine:
                 profit_loss=profit_loss,
                 profit_rate=profit_rate,
                 strategy_win_rate=win_rate,
+                daily_cumulative_pnl=self._daily_realized_pnl if order.side == OrderSide.SELL else None,
             )
 
             # 체결 완료 시 시그널 기록 리셋 (다음 시그널도 알림 받기 위함)
@@ -1047,6 +1054,9 @@ class TradingEngine:
     def _on_market_open(self) -> None:
         """장 시작 콜백"""
         logger.info("Market opened - syncing positions")
+
+        # 당일 누적 실현손익 리셋
+        self._daily_realized_pnl = 0
 
         # 정규장 시작 알림
         self._slack.send_market_open_notification()

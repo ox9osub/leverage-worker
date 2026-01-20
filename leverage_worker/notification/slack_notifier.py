@@ -195,16 +195,22 @@ class SlackNotifier:
         sign = "+" if profit_loss >= 0 else ""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+        # 수익/손실 아이콘 결정
+        if profit_rate >= 0:
+            profit_icon = "📈"
+        else:
+            profit_icon = "📉"
+
         # 전략명에 승률 포함
         strategy_display = strategy_name
         if strategy_win_rate is not None:
             strategy_display = f"{strategy_name}({strategy_win_rate:.1f}%)"
 
         lines = [
-            f"{self._get_mode_prefix()}[매도주문]",
+            f"{self._get_mode_prefix()}[매도주문] {profit_icon} {sign}{profit_loss:,}원 ({sign}{profit_rate:.2f}%)",
             f"{stock_name}({stock_code}) / {quantity}주 / {price:,}원 / {total_amount:,}원",
             f"손익: {sign}{profit_loss:,}원 ({sign}{profit_rate:.2f}%)",
-            f"전략: {strategy_display}" + (f" / {reason}" if reason else ""),
+            f"전략: {strategy_display}",
             timestamp,
         ]
 
@@ -273,6 +279,7 @@ class SlackNotifier:
         profit_loss: int = 0,
         profit_rate: float = 0.0,
         strategy_win_rate: Optional[float] = None,
+        daily_cumulative_pnl: Optional[int] = None,
     ) -> bool:
         """체결 완료 알림"""
         is_buy = fill_type.upper() == "BUY"
@@ -285,8 +292,16 @@ class SlackNotifier:
         if strategy_win_rate is not None:
             strategy_display = f"{strategy_name}({strategy_win_rate:.1f}%)"
 
+        # 첫 줄 구성 (매도체결 시 아이콘과 수익률 추가)
+        if is_buy:
+            first_line = f"{self._get_mode_prefix()}[{fill_text}]"
+        else:
+            profit_icon = "📈" if profit_rate >= 0 else "📉"
+            sign = "+" if profit_rate >= 0 else ""
+            first_line = f"{self._get_mode_prefix()}[{fill_text}] {profit_icon} {sign}{profit_rate:.2f}%"
+
         lines = [
-            f"{self._get_mode_prefix()}[{fill_text}]",
+            first_line,
             f"{stock_name}({stock_code}) / {quantity}주 / {price:,}원 / {total_amount:,}원",
         ]
 
@@ -296,6 +311,12 @@ class SlackNotifier:
             lines.append(f"손익: {sign}{profit_loss:,}원 ({sign}{profit_rate:.2f}%)")
 
         lines.append(f"전략: {strategy_display}")
+
+        # 매도 체결 시 당일 누적 수익 표시
+        if not is_buy and daily_cumulative_pnl is not None:
+            cum_sign = "+" if daily_cumulative_pnl >= 0 else ""
+            lines.append(f"당일 누적: {cum_sign}{daily_cumulative_pnl:,}원")
+
         lines.append(timestamp)
 
         return self.send_message("\n".join(lines))
