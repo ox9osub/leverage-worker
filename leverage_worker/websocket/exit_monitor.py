@@ -5,6 +5,7 @@
 기존 60초 폴링의 백업으로도 사용
 """
 
+import asyncio
 import sys
 import threading
 from dataclasses import dataclass
@@ -84,8 +85,31 @@ class ExitMonitor:
         logger.info("[ExitMonitor] Started (waiting for positions)")
 
     def stop(self) -> None:
-        """모니터링 중지"""
+        """모니터링 중지 - WebSocket graceful close 포함"""
         self._running = False
+
+        # WebSocket graceful close
+        if self._ws is not None:
+            try:
+                # KISWebSocket 재연결 방지
+                if self._kws is not None:
+                    self._kws.retry_count = self._kws.max_retries
+
+                # async close를 동기 코드에서 실행
+                asyncio.run(self._ws.close())
+                logger.info("[ExitMonitor] WebSocket connection closed gracefully")
+            except Exception as e:
+                logger.warning(f"[ExitMonitor] WebSocket close error (expected): {e}")
+            finally:
+                self._ws = None
+                self._kws = None
+
+        # 스레드 종료 대기
+        if self._ws_thread and self._ws_thread.is_alive():
+            self._ws_thread.join(timeout=3.0)
+            if self._ws_thread.is_alive():
+                logger.warning("[ExitMonitor] WebSocket thread did not terminate in time")
+        self._ws_thread = None
 
         with self._lock:
             self._monitored.clear()

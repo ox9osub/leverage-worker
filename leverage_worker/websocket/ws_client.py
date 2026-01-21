@@ -5,6 +5,7 @@ KISWebSocket을 래핑하여 별도 스레드에서 실행
 체결 데이터 수신 시 콜백 호출
 """
 
+import asyncio
 import sys
 import threading
 from pathlib import Path
@@ -48,6 +49,8 @@ class RealtimeWSClient:
         self._tick_handler = TickHandler()
 
         self._ws_thread: Optional[threading.Thread] = None
+        self._ws: Optional[websockets.ClientConnection] = None
+        self._kws: Optional[ka.KISWebSocket] = None
         self._running = False
         self._stock_codes: List[str] = []
 
@@ -75,8 +78,32 @@ class RealtimeWSClient:
         logger.info(f"WebSocket client started for {len(stock_codes)} stocks")
 
     def stop(self) -> None:
-        """WebSocket 연결 중지"""
+        """WebSocket 연결 중지 - graceful close 포함"""
         self._running = False
+
+        # WebSocket graceful close
+        if self._ws is not None:
+            try:
+                # KISWebSocket 재연결 방지
+                if self._kws is not None:
+                    self._kws.retry_count = self._kws.max_retries
+
+                # async close를 동기 코드에서 실행
+                asyncio.run(self._ws.close())
+                logger.info("WebSocket connection closed gracefully")
+            except Exception as e:
+                logger.warning(f"WebSocket close error (expected): {e}")
+            finally:
+                self._ws = None
+                self._kws = None
+
+        # 스레드 종료 대기
+        if self._ws_thread and self._ws_thread.is_alive():
+            self._ws_thread.join(timeout=3.0)
+            if self._ws_thread.is_alive():
+                logger.warning("WebSocket thread did not terminate in time")
+        self._ws_thread = None
+
         logger.info("WebSocket client stopped")
 
     def _run_websocket(self) -> None:
@@ -86,8 +113,8 @@ class RealtimeWSClient:
             ka.auth_ws()
             logger.info("WebSocket authenticated")
 
-            # WebSocket 객체 생성
-            kws = ka.KISWebSocket(api_url="/tryitout", max_retries=10)
+            # WebSocket 객체 생성 및 인스턴스 변수 저장
+            self._kws = ka.KISWebSocket(api_url="/tryitout", max_retries=10)
 
             # 종목별 체결가 구독 등록
             for stock_code in self._stock_codes:
@@ -98,7 +125,7 @@ class RealtimeWSClient:
                 logger.info(f"Subscribed to {stock_code}")
 
             # WebSocket 시작 (블로킹)
-            kws.start(
+            self._kws.start(
                 on_result=self._on_ws_result,
                 result_all_data=False,
             )
@@ -123,6 +150,10 @@ class RealtimeWSClient:
         """
         if not self._running:
             return
+
+        # WebSocket 연결 객체 저장 (graceful close용)
+        if self._ws is None:
+            self._ws = ws
 
         # H0STCNT0 (체결가)만 처리
         if tr_id != "H0STCNT0":
