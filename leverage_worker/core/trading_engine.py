@@ -970,8 +970,8 @@ class TradingEngine:
                     if not strategy.can_generate_signal(context):
                         continue
 
-                    # 시그널 생성
-                    signal = strategy.generate_signal(context)
+                    # 시그널 생성 (WebSocket 모드)
+                    signal = strategy.generate_signal(context, "websocket")
 
                     # 시그널 처리
                     self._process_signal(signal, context, strategy)

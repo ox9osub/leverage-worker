@@ -104,17 +104,28 @@ class MLPricePositionStrategy(BaseStrategy):
 
         return True
 
-    def generate_signal(self, context: StrategyContext) -> TradingSignal:
+    def generate_signal(self, context: StrategyContext, execution_mode: str = "scheduler") -> TradingSignal:
         """
         매매 시그널 생성
 
         - 미보유 시: 진입 조건 확인 (변동성 예측 + 가격 위치)
         - 보유 시: 청산 조건 확인 (TP/SL/시간)
+        
+        Args:
+            context: 전략 실행 컨텍스트
+            execution_mode: 실행 모드 ("scheduler" 또는 "websocket")
         """
         stock_code = context.stock_code
 
-        # 포지션 보유 시 - 청산 조건 확인
+        # 포지션 보유 시
         if context.has_position:
+            # 스케줄러 모드에서만 매수 시그널 체크 (로그용)
+            if execution_mode == "scheduler":
+                entry_signal = self._check_entry_condition(context)
+                if entry_signal.is_buy:
+                    logger.info(
+                        f"[{stock_code}] 매수 시그널 감지 (포지션 보유 중 - 스킵): {entry_signal.reason}"
+                    )
             return self._check_exit_condition(context)
 
         # 미보유 시 - 진입 조건 확인
