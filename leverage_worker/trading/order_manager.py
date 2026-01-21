@@ -639,6 +639,7 @@ class OrderManager:
             strategy_name=strategy_name,
             state=OrderState.SUBMITTED,
             avg_price=avg_price_for_pnl,
+            branch_no=result.order_branch or "",
         )
         self._active_orders[order_id] = order
         self._pending_stocks.add(stock_code)
@@ -678,7 +679,7 @@ class OrderManager:
         )
 
         # 기존 주문 취소
-        if not self._broker.cancel_order(order_id):
+        if not self.cancel_order(order_id):
             logger.warning(f"[{stock_code}] 지정가 주문 취소 실패, 체결 재확인")
             # 취소 실패 시 체결 상태 재확인
             filled_qty, unfilled_qty = self._broker.get_order_status(order_id)
