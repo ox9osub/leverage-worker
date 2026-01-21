@@ -11,7 +11,87 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Callable, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from leverage_worker.notification.slack_notifier import SlackNotifier
+
+
+class SlackHandler(logging.Handler):
+    """
+    ERROR 레벨 이상 로그를 Slack으로 전송하는 핸들러
+
+    무한 루프 방지를 위해 SlackNotifier 자체 로그는 제외
+    """
+
+    # Slack 전송 제외할 로거 이름들
+    EXCLUDED_LOGGERS = {"slack_notifier", "urllib3", "requests"}
+
+    def __init__(self, notifier: "SlackNotifier", level: int = logging.ERROR):
+        super().__init__(level)
+        self._notifier = notifier
+        self._sending = False  # 재진입 방지 플래그
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """로그 레코드를 Slack으로 전송"""
+        # 재진입 방지
+        if self._sending:
+            return
+
+        # 제외 로거 체크
+        if any(exc in record.name.lower() for exc in self.EXCLUDED_LOGGERS):
+            return
+
+        try:
+            self._sending = True
+
+            # 로그 메시지 포맷팅
+            title = f"[{record.levelname}] {record.name}"
+            message = self.format(record)
+
+            # Slack 전송
+            self._notifier.notify_error(title, message)
+        except Exception:
+            # Slack 전송 실패 시 무시 (로깅하면 무한 루프 위험)
+            pass
+        finally:
+            self._sending = False
+
+
+def attach_slack_handler(
+    notifier: "SlackNotifier",
+    logger_name: str = "leverage_worker",
+    level: int = logging.ERROR,
+) -> None:
+    """
+    로거에 Slack 핸들러 추가
+
+    Args:
+        notifier: SlackNotifier 인스턴스
+        logger_name: 핸들러를 추가할 로거 이름
+        level: 전송할 최소 로그 레벨 (기본: ERROR)
+    """
+    if not notifier.is_enabled():
+        return
+
+    logger = logging.getLogger(logger_name)
+
+    # 이미 SlackHandler가 있는지 확인
+    for handler in logger.handlers:
+        if isinstance(handler, SlackHandler):
+            return
+
+    # Slack 핸들러 추가
+    slack_handler = SlackHandler(notifier, level)
+    slack_handler.setFormatter(logging.Formatter(
+        fmt="%(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    ))
+
+    # 민감정보 마스킹 필터 추가
+    slack_handler.addFilter(SensitiveDataFilter())
+
+    logger.addHandler(slack_handler)
 
 
 class SensitiveDataFilter(logging.Filter):

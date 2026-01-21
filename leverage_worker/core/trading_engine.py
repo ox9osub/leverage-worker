@@ -39,7 +39,7 @@ from leverage_worker.strategy import (
 from leverage_worker.trading.broker import KISBroker, Position, OrderSide
 from leverage_worker.trading.order_manager import ManagedOrder, OrderManager
 from leverage_worker.trading.position_manager import PositionManager
-from leverage_worker.utils.logger import get_logger
+from leverage_worker.utils.logger import get_logger, attach_slack_handler
 from leverage_worker.utils.log_constants import LogEventType
 from leverage_worker.utils.math_utils import calculate_allocation_amount
 from leverage_worker.utils.structured_logger import get_structured_logger
@@ -102,6 +102,9 @@ class TradingEngine:
             channel=settings.notification.slack_channel,
             is_paper_mode=settings.is_paper_trading(),
         )
+
+        # ERROR 로그 Slack 전송 핸들러 연결
+        attach_slack_handler(self._slack)
 
         # 9. Daily Report Generator (매매 DB 사용)
         self._report_generator = DailyReportGenerator(self._trading_db, self._slack)
