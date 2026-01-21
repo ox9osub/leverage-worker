@@ -1145,25 +1145,21 @@ class TradingEngine:
             win_rate = self._settings.get_strategy_win_rate(stock_code, strategy.name)
             allocation = self._settings.get_strategy_allocation(stock_code, strategy.name)
 
-            # 매수 수량 계산: 예수금 99.9% 기준 (지정가 주문이므로 100% 근접 사용 가능)
-            deposit = self._broker.get_deposit()
-            if deposit > 0 and context.current_price > 0:
-                # 예수금의 99.9% 사용
-                available_amount = int(deposit * 0.999)
-                max_qty_by_deposit = available_amount // context.current_price
+            # 매수 수량 계산: inquire-psbl-order API 사용 (실제 주문가능수량)
+            buyable_qty = self._broker.get_buyable_quantity(stock_code)
+            if buyable_qty > 0:
                 # allocation 비율 적용
-                quantity = int(max_qty_by_deposit * (allocation / 100))
+                quantity = int(buyable_qty * (allocation / 100))
                 if quantity < 1:
                     logger.warning(f"[{stock_code}] 계산된 수량 0 → 최소 1주로 설정")
                     quantity = 1
                 logger.info(
                     f"[{stock_code}] 매수 수량 계산: {quantity}주 "
-                    f"(예수금: {deposit:,}원, 99.9%: {available_amount:,}원, allocation: {allocation}%)"
+                    f"(매수가능: {buyable_qty}주, allocation: {allocation}%)"
                 )
             else:
                 quantity = signal.quantity
-                available_amount = 0
-                logger.warning(f"[{stock_code}] 예수금 조회 실패 → 시그널 수량 사용: {quantity}주")
+                logger.warning(f"[{stock_code}] 매수가능수량 조회 실패 → 시그널 수량 사용: {quantity}주")
 
             # 시그널 알림 (주문 전)
             self._slack.notify_signal(
@@ -1178,11 +1174,13 @@ class TradingEngine:
             )
 
             # 지정가 추격 매수 (매도호가1로 주문 + 0.5초마다 정정)
+            # deposit: 가격 상승 시 수량 자동 조정용 (현재가 × 수량으로 추정)
+            estimated_deposit = context.current_price * quantity
             order_id = self._order_manager.place_buy_order_with_chase(
                 stock_code=stock_code,
                 stock_name=stock_name,
                 quantity=quantity,
-                deposit=available_amount,
+                deposit=estimated_deposit,
                 strategy_name=strategy.name,
                 interval=0.5,
                 max_retry=10,
