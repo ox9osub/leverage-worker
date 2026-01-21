@@ -925,11 +925,7 @@ class KISBroker:
                 "FID_ORG_ADJ_PRC": "0",  # 수정주가
             }
 
-            logger.info(f"[DEBUG] Daily candles API params: {params}")
             resp: APIResp = self._session.url_fetch(api_url, tr_id, params=params)
-
-            # 디버깅: API 응답 상태 확인
-            logger.info(f"[DEBUG] API response ok: {resp.is_ok()}")
             if not resp.is_ok():
                 error_code = resp.get_error_code()
                 error_msg = resp.get_error_message()
@@ -940,40 +936,16 @@ class KISBroker:
                 return []
 
             body = resp.get_body()
-
-            # 디버깅: 응답 구조 확인
-            if hasattr(body, "_fields"):
-                logger.info(f"[DEBUG] Response body fields: {body._fields}")
-            else:
-                logger.info(f"[DEBUG] Response body type: {type(body)}")
-
             output2 = getattr(body, "output2", None)
 
             # output2 검증
             if output2 is None:
                 logger.warning(f"No output2 in response for {stock_code}")
-                # 다른 필드 확인
-                for attr in ["output", "output1", "output2", "output3"]:
-                    val = getattr(body, attr, "NOT_FOUND")
-                    if val != "NOT_FOUND":
-                        logger.info(f"[DEBUG]   Found {attr}: type={type(val)}, len={len(val) if hasattr(val, '__len__') else 'N/A'}")
                 return []
 
             if not isinstance(output2, (list, tuple)):
                 logger.warning(f"output2 is not a list: {type(output2)}")
                 return []
-
-            logger.info(f"[DEBUG] output2 length: {len(output2)}")
-
-            # 첫 번째 아이템 구조 확인 (있는 경우)
-            if len(output2) > 0:
-                first_item = output2[0]
-                if hasattr(first_item, "_fields"):
-                    logger.info(f"[DEBUG] First item fields: {first_item._fields}")
-                elif isinstance(first_item, dict):
-                    logger.info(f"[DEBUG] First item keys: {list(first_item.keys())}")
-                else:
-                    logger.info(f"[DEBUG] First item type: {type(first_item)}")
 
             # dict/object 모두 처리하는 헬퍼 함수
             def get_value(obj, key: str, default=0):
@@ -1045,11 +1017,7 @@ class KISBroker:
                 "FID_ETC_CLS_CODE": "",  # 기타 구분 코드 (필수)
             }
 
-            logger.info(f"[DEBUG] Minute candles API params: {params}")
             resp: APIResp = self._session.url_fetch(api_url, tr_id, params=params)
-
-            # 디버깅: API 응답 상태 확인
-            logger.info(f"[DEBUG] API response ok: {resp.is_ok()}")
             if not resp.is_ok():
                 error_code = resp.get_error_code()
                 error_msg = resp.get_error_message()
@@ -1060,13 +1028,6 @@ class KISBroker:
                 return []
 
             body = resp.get_body()
-
-            # 디버깅: 응답 구조 확인
-            if hasattr(body, "_fields"):
-                logger.info(f"[DEBUG] Response body fields: {body._fields}")
-            else:
-                logger.info(f"[DEBUG] Response body type: {type(body)}")
-
             output2 = getattr(body, "output2", None)
 
             # output2 검증
@@ -1077,18 +1038,6 @@ class KISBroker:
             if not isinstance(output2, (list, tuple)):
                 logger.warning(f"Minute candles output2 is not a list: {type(output2)}")
                 return []
-
-            logger.info(f"[DEBUG] Minute candles output2 length: {len(output2)}")
-
-            # 첫 번째 아이템 구조 확인 (있는 경우)
-            if len(output2) > 0:
-                first_item = output2[0]
-                if hasattr(first_item, "_fields"):
-                    logger.info(f"[DEBUG] Minute first item fields: {first_item._fields}")
-                elif isinstance(first_item, dict):
-                    logger.info(f"[DEBUG] Minute first item keys: {list(first_item.keys())}")
-                else:
-                    logger.info(f"[DEBUG] Minute first item type: {type(first_item)}")
 
             # dict/object 모두 처리하는 헬퍼 함수
             def get_value(obj, key: str, default=0):

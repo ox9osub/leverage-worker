@@ -998,14 +998,19 @@ class TradingEngine:
                     return
 
                 # 2. DB 저장 (30개 분봉 upsert)
-                saved_count = self._save_minute_candles(stock_code, candle_data)
+                self._save_minute_candles(stock_code, candle_data)
 
                 # 현재가 로그 출력 (가장 최근 분봉 기준)
                 latest_candle = candle_data[0]  # 최신순 정렬
                 current_price = latest_candle["close_price"]
+                change_rate = latest_candle.get("change_rate", 0.0)
 
                 stock_config = self._settings.stocks.get(stock_code)
                 stock_name = stock_config.name if stock_config else stock_code
+
+                # 당일 등락률
+                change_sign = "+" if change_rate > 0 else ""
+                change_rate_str = f"({change_sign}{change_rate:.1f}%)"
 
                 # 보유 포지션 수익률 계산
                 position_profit_str = ""
@@ -1013,11 +1018,10 @@ class TradingEngine:
                 if position and position.avg_price > 0:
                     position_profit_rate = (current_price - position.avg_price) / position.avg_price * 100
                     position_sign = "+" if position_profit_rate >= 0 else ""
-                    position_profit_str = f" ({position_sign}{position_profit_rate:.1f}%)"
+                    position_profit_str = f" / 현재포지션 대비 ({position_sign}{position_profit_rate:.1f}%)"
 
                 logger.info(
-                    f"[{stock_name}] 현재가: {current_price:,}원 "
-                    f"(분봉 {saved_count}개 저장){position_profit_str}"
+                    f"[{stock_name}] 현재가: {current_price:,}원 {change_rate_str}{position_profit_str}"
                 )
 
                 # 3. 중복 주문 방지

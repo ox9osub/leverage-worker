@@ -54,6 +54,7 @@ class ManagedOrder:
     created_at: datetime = field(default_factory=datetime.now)
     updated_at: datetime = field(default_factory=datetime.now)
     branch_no: str = ""
+    avg_price: float = 0.0  # 매도 주문 시 손익 계산용 평균 매입가
 
     @property
     def is_pending(self) -> bool:
@@ -490,6 +491,10 @@ class OrderManager:
             )
             return None
 
+        # 손익 계산용 평균 매입가 저장 (position 삭제 전에 미리 저장)
+        position = self._position_manager.get_position(stock_code)
+        avg_price_for_pnl = position.avg_price if position else 0.0
+
         # 주문 실행
         result = self._broker.place_market_order(stock_code, OrderSide.SELL, quantity)
 
@@ -510,7 +515,7 @@ class OrderManager:
             )
             return None
 
-        # 주문 등록
+        # 주문 등록 (avg_price 포함)
         order = ManagedOrder(
             order_id=result.order_id,
             stock_code=stock_code,
@@ -520,6 +525,7 @@ class OrderManager:
             price=result.price,
             strategy_name=strategy_name,
             state=OrderState.SUBMITTED,
+            avg_price=avg_price_for_pnl,
         )
 
         self._active_orders[result.order_id] = order
@@ -591,6 +597,10 @@ class OrderManager:
             )
             return None
 
+        # 손익 계산용 평균 매입가 저장 (position 삭제 전에 미리 저장)
+        position = self._position_manager.get_position(stock_code)
+        avg_price_for_pnl = position.avg_price if position else 0.0
+
         # 1. 지정가 매도 주문 실행
         logger.info(
             f"[{stock_code}] 지정가 매도 시작: {quantity}주 @ {limit_price:,}원 "
@@ -618,7 +628,7 @@ class OrderManager:
 
         order_id = result.order_id
 
-        # 주문 등록
+        # 주문 등록 (avg_price 포함)
         order = ManagedOrder(
             order_id=order_id,
             stock_code=stock_code,
@@ -628,6 +638,7 @@ class OrderManager:
             price=limit_price,
             strategy_name=strategy_name,
             state=OrderState.SUBMITTED,
+            avg_price=avg_price_for_pnl,
         )
         self._active_orders[order_id] = order
         self._pending_stocks.add(stock_code)
@@ -702,7 +713,7 @@ class OrderManager:
             )
             return order_id  # 부분 체결된 지정가 주문 ID 반환
 
-        # 시장가 주문 등록
+        # 시장가 주문 등록 (동일한 avg_price 사용)
         market_order = ManagedOrder(
             order_id=market_result.order_id,
             stock_code=stock_code,
@@ -712,6 +723,7 @@ class OrderManager:
             price=market_result.price,
             strategy_name=strategy_name,
             state=OrderState.SUBMITTED,
+            avg_price=avg_price_for_pnl,
         )
         self._active_orders[market_result.order_id] = market_order
         self._pending_stocks.add(stock_code)
@@ -818,8 +830,8 @@ class OrderManager:
             },
         )
 
-        # 손익 계산용 평균가 (매도 시 position 삭제 전에 저장)
-        avg_price_for_pnl = 0.0
+        # 손익 계산용 평균가: order에 저장된 값 사용 (position 삭제 후에도 유효)
+        avg_price_for_pnl = order.avg_price
 
         if order.side == OrderSide.BUY:
             # 매수 체결 → 포지션 추가
@@ -836,15 +848,13 @@ class OrderManager:
             # 매도 체결 → 포지션 업데이트/제거
             position = self._position_manager.get_position(order.stock_code)
             if position:
-                # 콜백에서 손익 계산용으로 avg_price 저장 (position 삭제 전)
-                avg_price_for_pnl = position.avg_price
                 remaining = position.quantity - filled_qty
                 if remaining <= 0:
                     self._position_manager.remove_position(order.stock_code)
                 else:
                     self._position_manager.update_quantity(order.stock_code, remaining)
 
-        # 콜백 호출 (avg_price 전달)
+        # 콜백 호출 (order에 저장된 avg_price 전달)
         if self._on_fill_callback:
             self._on_fill_callback(order, filled_qty, avg_price_for_pnl)
 
