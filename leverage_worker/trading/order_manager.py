@@ -419,7 +419,21 @@ class OrderManager:
                 total_filled = latest_filled
 
             # 정정 주문
-            if self._broker.modify_order(order_id, order_branch, new_order_qty, new_ask_price):
+            new_order_id = self._broker.modify_order(order_id, order_branch, new_order_qty, new_ask_price)
+            if new_order_id:
+                # 주문번호가 변경된 경우 추적 업데이트
+                if new_order_id != order_id:
+                    self._active_orders.pop(order_id, None)
+                    order.order_id = new_order_id
+                    self._active_orders[new_order_id] = order
+                    logger.info(f"[{stock_code}] 주문번호 변경: {order_id} -> {new_order_id}")
+                    order_id = new_order_id  # 이후 루프에서 새 ID 사용
+
+                # ManagedOrder 상태 업데이트
+                order.quantity = new_order_qty
+                order.price = new_ask_price
+                order.updated_at = datetime.now()
+
                 current_price = new_ask_price
                 logger.info(
                     f"[{stock_code}] 정정 주문 #{retry+1}: "

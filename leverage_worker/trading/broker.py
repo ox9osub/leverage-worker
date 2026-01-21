@@ -560,7 +560,7 @@ class KISBroker:
         order_branch: str,
         quantity: int,
         new_price: int,
-    ) -> bool:
+    ) -> Optional[str]:
         """
         주문 정정 (가격/수량 변경)
 
@@ -571,7 +571,7 @@ class KISBroker:
             new_price: 정정 가격
 
         Returns:
-            성공 여부
+            새 주문번호 (성공 시) 또는 None (실패 시)
         """
         api_url = "/uapi/domestic-stock/v1/trading/order-rvsecncl"
         tr_id = "TTTC0803U"
@@ -595,10 +595,28 @@ class KISBroker:
         if not res.is_ok():
             error_msg = res.get_error_message()
             logger.error(f"Order modify failed: {order_id} - {error_msg}")
-            return False
+            return None
 
-        logger.info(f"Order modified: {order_id} -> {quantity}주 @ {new_price:,}원")
-        return True
+        try:
+            body = res.get_body()
+            output = body.output
+
+            # output이 딕셔너리인 경우와 namedtuple인 경우 모두 처리
+            if isinstance(output, dict):
+                new_order_id = output.get("ODNO", "")
+            else:
+                new_order_id = getattr(output, "ODNO", "")
+
+            logger.info(
+                f"Order modified: {order_id} -> {new_order_id}, "
+                f"{quantity}주 @ {new_price:,}원"
+            )
+            return new_order_id if new_order_id else order_id
+
+        except Exception as e:
+            logger.error(f"Failed to parse modify order response: {e}")
+            # 응답 파싱 실패해도 정정은 성공했으므로 원래 ID 반환
+            return order_id
 
     def get_pending_orders(self) -> List[OrderInfo]:
         """

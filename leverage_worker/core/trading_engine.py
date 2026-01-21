@@ -628,6 +628,8 @@ class TradingEngine:
                 profit_rate=profit_rate,
                 strategy_win_rate=win_rate,
                 daily_cumulative_pnl=self._daily_realized_pnl if order.side == OrderSide.SELL else None,
+                total_filled=order.filled_qty,
+                order_quantity=order.quantity,
             )
 
             # 체결 완료 시 시그널 기록 리셋 (다음 시그널도 알림 받기 위함)

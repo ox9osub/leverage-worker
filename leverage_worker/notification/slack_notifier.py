@@ -280,8 +280,25 @@ class SlackNotifier:
         profit_rate: float = 0.0,
         strategy_win_rate: Optional[float] = None,
         daily_cumulative_pnl: Optional[int] = None,
+        total_filled: Optional[int] = None,
+        order_quantity: Optional[int] = None,
     ) -> bool:
-        """체결 완료 알림"""
+        """체결 완료 알림
+
+        Args:
+            fill_type: 매매 유형 ("BUY" 또는 "SELL")
+            stock_code: 종목코드
+            stock_name: 종목명
+            quantity: 현재 체결 수량
+            price: 체결가
+            strategy_name: 전략명
+            profit_loss: 손익 금액 (매도 시)
+            profit_rate: 손익률 (매도 시)
+            strategy_win_rate: 전략 승률
+            daily_cumulative_pnl: 당일 누적 손익
+            total_filled: 누적 체결 수량
+            order_quantity: 전체 주문 수량
+        """
         is_buy = fill_type.upper() == "BUY"
         fill_text = "매수체결" if is_buy else "매도체결"
         total_amount = quantity * price
@@ -292,18 +309,27 @@ class SlackNotifier:
         if strategy_win_rate is not None:
             strategy_display = f"{strategy_name}({strategy_win_rate:.1f}%)"
 
+        # 분할 체결 표시 (현재/누적/전체)
+        fill_ratio = ""
+        if total_filled is not None and order_quantity is not None:
+            fill_ratio = f" ({quantity}/{total_filled}/{order_quantity})"
+
         # 첫 줄 구성 (매도체결 시 아이콘과 수익률 추가)
         if is_buy:
-            first_line = f"{self._get_mode_prefix()}[{fill_text}]"
+            first_line = f"{self._get_mode_prefix()}[{fill_text}]{fill_ratio}"
         else:
             profit_icon = "📈" if profit_rate >= 0 else "📉"
             sign = "+" if profit_rate >= 0 else ""
-            first_line = f"{self._get_mode_prefix()}[{fill_text}] {profit_icon} {sign}{profit_rate:.2f}%"
+            first_line = f"{self._get_mode_prefix()}[{fill_text}]{fill_ratio} {profit_icon} {sign}{profit_rate:.2f}%"
 
         lines = [
             first_line,
             f"{stock_name}({stock_code}) / {quantity}주 / {price:,}원 / {total_amount:,}원",
         ]
+
+        # 분할 체결 상세 표시
+        if total_filled is not None and order_quantity is not None:
+            lines.append(f"체결: {quantity}주 / 누적: {total_filled}주 / 전체: {order_quantity}주")
 
         # 매도 체결 시 손익 정보 추가
         if not is_buy:
