@@ -680,6 +680,21 @@ class OrderManager:
             f"[{stock_code}] 지정가 매도 미체결: {unfilled_qty}주 → 시장가 전환"
         )
 
+        # 부분 체결분 처리 (취소 전에 먼저 처리)
+        if filled_qty > 0 and order_id in self._active_orders:
+            order = self._active_orders[order_id]
+            # 체결가 조회
+            broker_order = next(
+                (o for o in self._broker.get_today_orders() if o.order_id == order_id),
+                None
+            )
+            if broker_order:
+                order.filled_qty = filled_qty
+                order.filled_price = broker_order.filled_price
+                self._handle_fill(order, filled_qty)
+            else:
+                logger.warning(f"[{stock_code}] 부분 체결 정보 조회 실패: {filled_qty}주 체결됨")
+
         # 기존 주문 취소
         if not self.cancel_order(order_id):
             logger.warning(f"[{stock_code}] 지정가 주문 취소 실패, 체결 재확인")
@@ -851,9 +866,11 @@ class OrderManager:
             # 매도 체결 → 포지션 업데이트/제거 + 손익 계산
             position = self._position_manager.get_position(order.stock_code)
             if position:
-                # 손익 계산 (포지션 삭제 전에 계산)
+                # 손익 계산 (포지션 삭제 전에 계산) - 누적 방식
                 if avg_price_for_pnl > 0:
-                    order.pnl = int((order.filled_price - avg_price_for_pnl) * filled_qty)
+                    this_pnl = int((order.filled_price - avg_price_for_pnl) * filled_qty)
+                    order.pnl = (order.pnl or 0) + this_pnl  # 부분 체결 시 누적
+                    # pnl_rate는 전체 체결 기준으로 재계산
                     order.pnl_rate = ((order.filled_price - avg_price_for_pnl) / avg_price_for_pnl) * 100
 
                 remaining = position.quantity - filled_qty

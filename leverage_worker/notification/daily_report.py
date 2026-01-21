@@ -138,10 +138,10 @@ class DailyReportGenerator:
 
         report = DailyReport(date=date)
 
-        # DB에서 당일 체결된 주문 조회
+        # DB에서 당일 체결된 주문 조회 (부분 체결 후 취소된 주문도 포함)
         query = """
             SELECT * FROM orders
-            WHERE DATE(created_at) = ? AND status = 'filled'
+            WHERE DATE(created_at) = ? AND filled_quantity > 0
             ORDER BY created_at ASC
         """
 
