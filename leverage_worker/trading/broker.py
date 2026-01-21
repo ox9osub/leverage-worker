@@ -1063,7 +1063,6 @@ class KISBroker:
                     logger.warning(f"Failed to parse minute candle: {e}")
                     continue
 
-            logger.info(f"Loaded {len(candles)} minute candles for {stock_code}")
             return candles
 
         except Exception as e:
