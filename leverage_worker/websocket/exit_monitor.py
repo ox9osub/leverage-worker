@@ -9,7 +9,7 @@ import asyncio
 import sys
 import threading
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time as dt_time
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set
 
@@ -17,6 +17,7 @@ import pandas as pd
 import websockets
 
 from leverage_worker.utils.logger import get_logger
+from leverage_worker.utils.time_utils import is_trading_hours
 from leverage_worker.websocket.tick_handler import TickData, TickHandler
 
 logger = get_logger(__name__)
@@ -50,6 +51,10 @@ class ExitMonitor:
     실시간 가격으로 TP/SL/Timeout 체크
     매도 체결 후 구독 해제
     """
+
+    # WebSocket 운영 시간 (KRX 정규장 시간)
+    WS_MARKET_OPEN = "08:59"
+    WS_MARKET_CLOSE = "15:30"
 
     def __init__(
         self,
@@ -192,8 +197,20 @@ class ExitMonitor:
         """WebSocket 연결 여부"""
         return self._ws_thread is not None and self._ws_thread.is_alive()
 
+    def _is_ws_market_hours(self) -> bool:
+        """WebSocket 운영 시간인지 확인 (08:59~15:30)"""
+        return is_trading_hours(datetime.now(), self.WS_MARKET_OPEN, self.WS_MARKET_CLOSE)
+
     def _start_websocket(self, stock_codes: List[str]) -> None:
         """WebSocket 연결 시작 (별도 스레드)"""
+        # 시장 시간 체크
+        if not self._is_ws_market_hours():
+            logger.info(
+                f"[ExitMonitor] WebSocket skipped - outside market hours "
+                f"({self.WS_MARKET_OPEN}~{self.WS_MARKET_CLOSE})"
+            )
+            return
+
         self._ws_thread = threading.Thread(
             target=self._run_websocket,
             args=(stock_codes,),
@@ -234,6 +251,13 @@ class ExitMonitor:
     def _subscribe_stock(self, stock_code: str) -> None:
         """종목 구독 추가 (동적)"""
         if stock_code in self._subscribed_stocks:
+            return
+
+        # 시장 시간 체크
+        if not self._is_ws_market_hours():
+            logger.debug(
+                f"[ExitMonitor] Subscribe skipped for {stock_code} - outside market hours"
+            )
             return
 
         # NOTE: KIS WebSocket의 동적 구독은 연결 후 send_multiple 호출 필요
