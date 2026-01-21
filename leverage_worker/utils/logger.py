@@ -71,7 +71,7 @@ def attach_slack_handler(
         logger_name: 핸들러를 추가할 로거 이름
         level: 전송할 최소 로그 레벨 (기본: ERROR)
     """
-    if not notifier.is_enabled():
+    if not notifier.is_enabled:
         return
 
     logger = logging.getLogger(logger_name)
