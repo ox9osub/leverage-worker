@@ -850,23 +850,23 @@ class KISBroker:
             logger.info(f"  - ovrs_re_use_amt_wcrc (해외재사용금액): {ovrs_re_use_amt_wcrc:,}원")
             logger.info(f"  - ord_psbl_frcr_amt_wcrc (주문가능외화금액): {ord_psbl_frcr_amt_wcrc:,}원")
 
-            # 최대매수금액을 현재가로 나누어 계산 (MTS와 동일한 방식)
+            # 주문가능현금을 현재가로 나누어 계산 (MTS 현금매수가능과 동일)
             # current_price가 전달되면 현재가 사용, 아니면 API의 계산단가 사용
             calc_price = current_price if current_price > 0 else psbl_qty_calc_unpr
 
             if calc_price > 0:
-                calculated_qty = max_buy_amt // calc_price
+                calculated_qty = ord_psbl_cash // calc_price
                 logger.info(
                     f"[{stock_code}] 매수수량 계산: "
-                    f"{max_buy_amt:,} / {calc_price:,} = {calculated_qty}주"
+                    f"{ord_psbl_cash:,} / {calc_price:,} = {calculated_qty}주"
                 )
-                return calculated_qty, max_buy_amt
+                return calculated_qty, ord_psbl_cash
 
             # fallback: 기존 방식 (계산단가가 없는 경우)
             logger.warning(
                 f"[{stock_code}] 계산단가 없음, 미수없는매수수량 사용: {nrcvb_buy_qty}주"
             )
-            return nrcvb_buy_qty, nrcvb_buy_amt
+            return nrcvb_buy_qty, ord_psbl_cash
 
         except Exception as e:
             logger.error(f"Failed to get buyable quantity: {e}")
