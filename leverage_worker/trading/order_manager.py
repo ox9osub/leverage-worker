@@ -94,16 +94,18 @@ class OrderManager:
         # 종목별 진행 중 주문 (중복 방지)
         self._pending_stocks: Set[str] = set()
 
-        # 콜백
-        self._on_fill_callback: Optional[Callable] = None
+        # 콜백 (order, filled_qty, avg_price)
+        self._on_fill_callback: Optional[Callable[["ManagedOrder", int, float], None]] = None
 
         # 감사 추적 로거
         self._audit = get_audit_logger()
 
         logger.info("OrderManager initialized")
 
-    def set_on_fill_callback(self, callback: Callable) -> None:
-        """체결 콜백 설정"""
+    def set_on_fill_callback(
+        self, callback: Callable[["ManagedOrder", int, float], None]
+    ) -> None:
+        """체결 콜백 설정 (order, filled_qty, avg_price)"""
         self._on_fill_callback = callback
 
     def place_buy_order(
@@ -816,6 +818,9 @@ class OrderManager:
             },
         )
 
+        # 손익 계산용 평균가 (매도 시 position 삭제 전에 저장)
+        avg_price_for_pnl = 0.0
+
         if order.side == OrderSide.BUY:
             # 매수 체결 → 포지션 추가
             self._position_manager.add_position(
@@ -831,15 +836,17 @@ class OrderManager:
             # 매도 체결 → 포지션 업데이트/제거
             position = self._position_manager.get_position(order.stock_code)
             if position:
+                # 콜백에서 손익 계산용으로 avg_price 저장 (position 삭제 전)
+                avg_price_for_pnl = position.avg_price
                 remaining = position.quantity - filled_qty
                 if remaining <= 0:
                     self._position_manager.remove_position(order.stock_code)
                 else:
                     self._position_manager.update_quantity(order.stock_code, remaining)
 
-        # 콜백 호출
+        # 콜백 호출 (avg_price 전달)
         if self._on_fill_callback:
-            self._on_fill_callback(order, filled_qty)
+            self._on_fill_callback(order, filled_qty, avg_price_for_pnl)
 
     def cancel_order(self, order_id: str) -> bool:
         """단일 주문 취소"""

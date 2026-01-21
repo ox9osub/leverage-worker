@@ -580,25 +580,28 @@ class TradingEngine:
         except Exception as e:
             logger.error(f"Check fills error: {e}")
 
-    def _on_order_fill(self, order: ManagedOrder, filled_qty: int) -> None:
-        """체결 콜백 - 슬랙 알림 전송 및 ExitMonitor 등록/해제"""
+    def _on_order_fill(
+        self, order: ManagedOrder, filled_qty: int, avg_price: float = 0.0
+    ) -> None:
+        """체결 콜백 - 슬랙 알림 전송 및 ExitMonitor 등록/해제
+
+        Args:
+            order: 체결된 주문
+            filled_qty: 체결 수량
+            avg_price: 손익 계산용 평균 매입가 (매도 시 position 삭제 전 저장된 값)
+        """
         try:
             # 손익 계산 (매도인 경우)
             profit_loss = 0
             profit_rate = 0.0
 
             if order.side == OrderSide.SELL:
-                position = self._position_manager.get_position(order.stock_code)
-                if position:
-                    profit_loss = int(
-                        (order.filled_price - position.avg_price) * filled_qty
+                # 전달받은 avg_price로 손익 계산 (position 삭제 전 저장된 값)
+                if avg_price > 0:
+                    profit_loss = int((order.filled_price - avg_price) * filled_qty)
+                    profit_rate = (
+                        (order.filled_price - avg_price) / avg_price * 100
                     )
-                    if position.avg_price > 0:
-                        profit_rate = (
-                            (order.filled_price - position.avg_price)
-                            / position.avg_price
-                            * 100
-                        )
 
                 # 당일 누적 실현손익 업데이트
                 self._daily_realized_pnl += profit_loss
