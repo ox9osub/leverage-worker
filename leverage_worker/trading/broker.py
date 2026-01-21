@@ -781,6 +781,9 @@ class KISBroker:
         """
         매수 가능 수량 조회 (시장가 기준)
 
+        주문가능현금(ord_psbl_cash)을 가능수량계산단가(psbl_qty_calc_unpr)로 나누어
+        MTS와 동일한 방식으로 매수 가능 수량을 계산합니다.
+
         Args:
             stock_code: 종목코드
 
@@ -812,11 +815,54 @@ class KISBroker:
             output = body.output
 
             # output이 딕셔너리인 경우와 namedtuple인 경우 모두 처리
-            if isinstance(output, dict):
-                qty = int(output.get("nrcvb_buy_qty", 0) or 0)
-            else:
-                qty = int(getattr(output, "nrcvb_buy_qty", 0) or 0)
-            return qty
+            def get_value(key: str, default: int = 0) -> int:
+                if isinstance(output, dict):
+                    return int(output.get(key, default) or default)
+                return int(getattr(output, key, default) or default)
+
+            # API 응답 필드 추출 (모든 금액/수량 관련 필드)
+            ord_psbl_cash = get_value("ord_psbl_cash")  # 주문가능현금
+            ord_psbl_sbst = get_value("ord_psbl_sbst")  # 주문가능대용
+            ruse_psbl_amt = get_value("ruse_psbl_amt")  # 재사용가능금액
+            fund_rpch_chgs = get_value("fund_rpch_chgs")  # 펀드환매대금
+            psbl_qty_calc_unpr = get_value("psbl_qty_calc_unpr")  # 가능수량계산단가
+            nrcvb_buy_amt = get_value("nrcvb_buy_amt")  # 미수없는매수금액
+            nrcvb_buy_qty = get_value("nrcvb_buy_qty")  # 미수없는매수수량
+            max_buy_amt = get_value("max_buy_amt")  # 최대매수금액
+            max_buy_qty = get_value("max_buy_qty")  # 최대매수수량
+            cma_evlu_amt = get_value("cma_evlu_amt")  # CMA평가금액
+            ovrs_re_use_amt_wcrc = get_value("ovrs_re_use_amt_wcrc")  # 해외재사용금액원화
+            ord_psbl_frcr_amt_wcrc = get_value("ord_psbl_frcr_amt_wcrc")  # 주문가능외화금액원화
+
+            # 디버깅 로그 - 모든 금액/수량 정보 출력
+            logger.info(f"[{stock_code}] 매수가능조회 응답:")
+            logger.info(f"  - ord_psbl_cash (주문가능현금): {ord_psbl_cash:,}원")
+            logger.info(f"  - ord_psbl_sbst (주문가능대용): {ord_psbl_sbst:,}원")
+            logger.info(f"  - ruse_psbl_amt (재사용가능금액): {ruse_psbl_amt:,}원")
+            logger.info(f"  - fund_rpch_chgs (펀드환매대금): {fund_rpch_chgs:,}원")
+            logger.info(f"  - psbl_qty_calc_unpr (가능수량계산단가): {psbl_qty_calc_unpr:,}원")
+            logger.info(f"  - nrcvb_buy_amt (미수없는매수금액): {nrcvb_buy_amt:,}원")
+            logger.info(f"  - nrcvb_buy_qty (미수없는매수수량): {nrcvb_buy_qty:,}주")
+            logger.info(f"  - max_buy_amt (최대매수금액): {max_buy_amt:,}원")
+            logger.info(f"  - max_buy_qty (최대매수수량): {max_buy_qty:,}주")
+            logger.info(f"  - cma_evlu_amt (CMA평가금액): {cma_evlu_amt:,}원")
+            logger.info(f"  - ovrs_re_use_amt_wcrc (해외재사용금액): {ovrs_re_use_amt_wcrc:,}원")
+            logger.info(f"  - ord_psbl_frcr_amt_wcrc (주문가능외화금액): {ord_psbl_frcr_amt_wcrc:,}원")
+
+            # 주문가능현금으로 직접 계산 (MTS와 동일한 방식)
+            if psbl_qty_calc_unpr > 0:
+                calculated_qty = ord_psbl_cash // psbl_qty_calc_unpr
+                logger.info(
+                    f"[{stock_code}] 매수수량 계산: "
+                    f"{ord_psbl_cash:,} / {psbl_qty_calc_unpr:,} = {calculated_qty}주"
+                )
+                return calculated_qty
+
+            # fallback: 기존 방식 (계산단가가 없는 경우)
+            logger.warning(
+                f"[{stock_code}] 계산단가 없음, 미수없는매수수량 사용: {nrcvb_buy_qty}주"
+            )
+            return nrcvb_buy_qty
 
         except Exception as e:
             logger.error(f"Failed to get buyable quantity: {e}")
