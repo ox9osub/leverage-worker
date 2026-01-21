@@ -204,6 +204,45 @@ class KISBroker:
             logger.error(f"Failed to parse asking price response: {e}")
             return None
 
+    def get_bidding_price(self, stock_code: str) -> Optional[int]:
+        """
+        매수호가1 (최우선 매수가) 조회
+
+        Args:
+            stock_code: 종목코드 (6자리)
+
+        Returns:
+            매수호가1 가격 또는 None
+        """
+        api_url = "/uapi/domestic-stock/v1/quotations/inquire-asking-price-exp-ccn"
+        tr_id = "FHKST01010200"
+
+        params = {
+            "FID_COND_MRKT_DIV_CODE": "J",  # KRX
+            "FID_INPUT_ISCD": stock_code,
+        }
+
+        res = self._session.url_fetch(api_url, tr_id, params=params)
+        self._session.smart_sleep()
+
+        if not res.is_ok():
+            res.print_error(api_url)
+            return None
+
+        try:
+            body = res.get_body()
+            output1 = body.output1
+
+            if isinstance(output1, dict):
+                bidp1 = output1.get("bidp1", "0")
+            else:
+                bidp1 = getattr(output1, "bidp1", "0")
+
+            return int(bidp1)
+        except Exception as e:
+            logger.error(f"Failed to parse bidding price response: {e}")
+            return None
+
     def get_balance(self) -> Tuple[List[Position], Dict[str, Any]]:
         """
         잔고 조회

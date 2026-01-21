@@ -768,29 +768,29 @@ class TradingEngine:
 
                 order_id = None
                 if is_take_profit:
-                    # TP: 지정가 매도 (1초 후 미체결 시 시장가)
-                    strategies = self._settings.get_stock_strategies(stock_code)
-                    take_profit_pct = 0.003
-                    for strat_config in strategies:
-                        if strat_config.get("name") == strategy_name:
-                            params = strat_config.get("params", {})
-                            take_profit_pct = params.get("take_profit_pct", 0.003)
-                            break
+                    # TP: 매수1호가 지정가 매도 (1초 후 미체결 시 시장가)
+                    bid_price = self._broker.get_bidding_price(stock_code)
+                    if not bid_price or bid_price <= 0:
+                        logger.warning(f"[ExitMonitor] {stock_code} 매수1호가 조회 실패, 시장가 매도로 전환")
+                        order_id = self._order_manager.place_sell_order(
+                            stock_code=stock_code,
+                            stock_name=stock_name,
+                            quantity=quantity,
+                            strategy_name=strategy_name,
+                        )
+                    else:
+                        logger.info(
+                            f"[ExitMonitor] {stock_code} TP 지정가 매도: {quantity}주 @ {bid_price:,}원 (매수1호가)"
+                        )
 
-                    tp_price = int(position.avg_price * (1 + take_profit_pct))
-
-                    logger.info(
-                        f"[ExitMonitor] {stock_code} TP 지정가 매도: {quantity}주 @ {tp_price:,}원"
-                    )
-
-                    order_id = self._order_manager.place_sell_order_with_fallback(
-                        stock_code=stock_code,
-                        stock_name=stock_name,
-                        quantity=quantity,
-                        strategy_name=strategy_name,
-                        limit_price=tp_price,
-                        fallback_seconds=1.0,
-                    )
+                        order_id = self._order_manager.place_sell_order_with_fallback(
+                            stock_code=stock_code,
+                            stock_name=stock_name,
+                            quantity=quantity,
+                            strategy_name=strategy_name,
+                            limit_price=bid_price,
+                            fallback_seconds=1.0,
+                        )
                 else:
                     # SL/Timeout: 시장가 매도
                     logger.info(f"[ExitMonitor] {stock_code} 시장가 매도: {quantity}주")
@@ -1234,32 +1234,29 @@ class TradingEngine:
             is_take_profit = "익절" in signal.reason
 
             if is_take_profit and position:
-                # TP 달성: 지정가 매도 (목표 수익률 가격)
-                # 전략 설정에서 take_profit_pct 가져오기
-                take_profit_pct = 0.003  # 기본값
-                strategies = self._settings.get_stock_strategies(stock_code)
-                for strat_config in strategies:
-                    if strat_config.get("name") == strategy.name:
-                        params = strat_config.get("params", {})
-                        take_profit_pct = params.get("take_profit_pct", 0.003)
-                        break
+                # TP: 매수1호가 지정가 매도 (즉시 체결)
+                bid_price = self._broker.get_bidding_price(stock_code)
+                if not bid_price or bid_price <= 0:
+                    logger.warning(f"[{stock_code}] 매수1호가 조회 실패, 시장가 매도로 전환")
+                    order_id = self._order_manager.place_sell_order(
+                        stock_code=stock_code,
+                        stock_name=stock_name,
+                        quantity=signal.quantity,
+                        strategy_name=strategy.name,
+                    )
+                else:
+                    logger.info(
+                        f"[{stock_code}] TP 지정가 매도: {signal.quantity}주 @ {bid_price:,}원 (매수1호가)"
+                    )
 
-                # TP 가격 = 평균단가 × (1 + take_profit_pct)
-                tp_price = int(position.avg_price * (1 + take_profit_pct))
-
-                logger.info(
-                    f"[{stock_code}] TP 지정가 매도: {signal.quantity}주 @ {tp_price:,}원 "
-                    f"(평균단가: {position.avg_price:,}원, TP: {take_profit_pct:.2%})"
-                )
-
-                order_id = self._order_manager.place_sell_order_with_fallback(
-                    stock_code=stock_code,
-                    stock_name=stock_name,
-                    quantity=signal.quantity,
-                    strategy_name=strategy.name,
-                    limit_price=tp_price,
-                    fallback_seconds=1.0,
-                )
+                    order_id = self._order_manager.place_sell_order_with_fallback(
+                        stock_code=stock_code,
+                        stock_name=stock_name,
+                        quantity=signal.quantity,
+                        strategy_name=strategy.name,
+                        limit_price=bid_price,
+                        fallback_seconds=1.0,
+                    )
             else:
                 # SL/Timeout/Overnight: 시장가 매도
                 order_id = self._order_manager.place_sell_order(

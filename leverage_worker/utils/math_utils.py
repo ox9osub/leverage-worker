@@ -104,6 +104,28 @@ def clamp(value: Number, min_value: Number, max_value: Number) -> Number:
     return max(min_value, min(max_value, value))
 
 
+def get_tick_size(price: Number) -> int:
+    """
+    한국 주식시장 가격대별 호가단위 반환
+
+    Args:
+        price: 주식 가격
+
+    Returns:
+        해당 가격대의 호가단위
+    """
+    if price < 1000:
+        return 1
+    elif price < 5000:
+        return 5
+    elif price < 10000:
+        return 10
+    elif price < 50000:
+        return 50
+    else:
+        return 100
+
+
 def round_to_tick(price: float, tick_size: float = 1.0) -> int:
     """
     가격을 틱 단위로 반올림
@@ -118,6 +140,27 @@ def round_to_tick(price: float, tick_size: float = 1.0) -> int:
     if tick_size <= 0:
         return int(round(price))
     return int(round(price / tick_size) * tick_size)
+
+
+def round_price_to_tick(price: Number, direction: str = "round") -> int:
+    """
+    가격을 한국 주식시장 호가단위에 맞게 조정
+
+    Args:
+        price: 원본 가격
+        direction: "round"(반올림), "down"(내림), "up"(올림)
+
+    Returns:
+        호가단위에 맞게 조정된 가격
+    """
+    tick = get_tick_size(price)
+
+    if direction == "down":
+        return int(price // tick * tick)
+    elif direction == "up":
+        return int((price + tick - 1) // tick * tick)
+    else:  # round
+        return int(round(price / tick) * tick)
 
 
 def calculate_allocation_amount(
