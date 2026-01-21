@@ -664,7 +664,6 @@ class KISWebSocket:
     # private
     async def __subscriber(self, ws: websockets.ClientConnection):
         async for raw in ws:
-            logging.info("received message >> %s" % raw)
             show_result = False
 
             df = pd.DataFrame()
