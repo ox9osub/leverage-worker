@@ -777,18 +777,19 @@ class KISBroker:
 
         return cancelled
 
-    def get_buyable_quantity(self, stock_code: str) -> int:
+    def get_buyable_quantity(self, stock_code: str, current_price: int = 0) -> tuple[int, int]:
         """
-        매수 가능 수량 조회 (시장가 기준)
+        매수 가능 수량 및 최대매수금액 조회
 
-        주문가능현금(ord_psbl_cash)을 가능수량계산단가(psbl_qty_calc_unpr)로 나누어
-        MTS와 동일한 방식으로 매수 가능 수량을 계산합니다.
+        최대매수금액(max_buy_amt)을 현재가로 나누어 MTS와 동일한 방식으로
+        매수 가능 수량을 계산합니다.
 
         Args:
             stock_code: 종목코드
+            current_price: 현재가 (0이면 API의 가능수량계산단가 사용)
 
         Returns:
-            매수 가능 수량
+            (매수 가능 수량, 최대매수금액) 튜플
         """
         api_url = "/uapi/domestic-stock/v1/trading/inquire-psbl-order"
         tr_id = "TTTC8908R"
@@ -808,7 +809,7 @@ class KISBroker:
 
         if not res.is_ok():
             res.print_error(api_url)
-            return 0
+            return 0, 0
 
         try:
             body = res.get_body()
@@ -849,24 +850,27 @@ class KISBroker:
             logger.info(f"  - ovrs_re_use_amt_wcrc (해외재사용금액): {ovrs_re_use_amt_wcrc:,}원")
             logger.info(f"  - ord_psbl_frcr_amt_wcrc (주문가능외화금액): {ord_psbl_frcr_amt_wcrc:,}원")
 
-            # 주문가능현금으로 직접 계산 (MTS와 동일한 방식)
-            if psbl_qty_calc_unpr > 0:
-                calculated_qty = ord_psbl_cash // psbl_qty_calc_unpr
+            # 최대매수금액을 현재가로 나누어 계산 (MTS와 동일한 방식)
+            # current_price가 전달되면 현재가 사용, 아니면 API의 계산단가 사용
+            calc_price = current_price if current_price > 0 else psbl_qty_calc_unpr
+
+            if calc_price > 0:
+                calculated_qty = max_buy_amt // calc_price
                 logger.info(
                     f"[{stock_code}] 매수수량 계산: "
-                    f"{ord_psbl_cash:,} / {psbl_qty_calc_unpr:,} = {calculated_qty}주"
+                    f"{max_buy_amt:,} / {calc_price:,} = {calculated_qty}주"
                 )
-                return calculated_qty
+                return calculated_qty, max_buy_amt
 
             # fallback: 기존 방식 (계산단가가 없는 경우)
             logger.warning(
                 f"[{stock_code}] 계산단가 없음, 미수없는매수수량 사용: {nrcvb_buy_qty}주"
             )
-            return nrcvb_buy_qty
+            return nrcvb_buy_qty, nrcvb_buy_amt
 
         except Exception as e:
             logger.error(f"Failed to get buyable quantity: {e}")
-            return 0
+            return 0, 0
 
     def get_deposit(self) -> int:
         """

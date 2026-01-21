@@ -1147,8 +1147,9 @@ class TradingEngine:
             win_rate = self._settings.get_strategy_win_rate(stock_code, strategy.name)
             allocation = self._settings.get_strategy_allocation(stock_code, strategy.name)
 
-            # 매수 수량 계산: inquire-psbl-order API 사용 (실제 주문가능수량)
-            buyable_qty = self._broker.get_buyable_quantity(stock_code)
+            # 매수 수량 및 최대매수금액 조회: inquire-psbl-order API 사용
+            # 현재가를 전달하여 MTS와 동일한 방식으로 계산
+            buyable_qty, max_buy_amt = self._broker.get_buyable_quantity(stock_code, context.current_price)
             if buyable_qty > 0:
                 # allocation 비율 적용
                 quantity = int(buyable_qty * (allocation / 100))
@@ -1157,10 +1158,11 @@ class TradingEngine:
                     quantity = 1
                 logger.info(
                     f"[{stock_code}] 매수 수량 계산: {quantity}주 "
-                    f"(매수가능: {buyable_qty}주, allocation: {allocation}%)"
+                    f"(매수가능: {buyable_qty}주, allocation: {allocation}%, 최대금액: {max_buy_amt:,}원)"
                 )
             else:
                 quantity = signal.quantity
+                max_buy_amt = context.current_price * quantity  # fallback
                 logger.warning(f"[{stock_code}] 매수가능수량 조회 실패 → 시그널 수량 사용: {quantity}주")
 
             # 시그널 알림 (주문 전)
@@ -1176,13 +1178,12 @@ class TradingEngine:
             )
 
             # 지정가 추격 매수 (매도호가1로 주문 + 0.5초마다 정정)
-            # deposit: 가격 상승 시 수량 자동 조정용 (현재가 × 수량으로 추정)
-            estimated_deposit = context.current_price * quantity
+            # deposit: 가격 상승 시 수량 자동 조정용 (실제 최대매수금액 사용)
             order_id = self._order_manager.place_buy_order_with_chase(
                 stock_code=stock_code,
                 stock_name=stock_name,
                 quantity=quantity,
-                deposit=estimated_deposit,
+                deposit=max_buy_amt,
                 strategy_name=strategy.name,
                 interval=0.5,
                 max_retry=10,
