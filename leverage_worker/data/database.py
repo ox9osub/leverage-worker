@@ -362,6 +362,9 @@ class TradingDB(Database):
                     filled_price REAL,
                     status TEXT NOT NULL,
                     strategy_name TEXT,
+                    pnl INTEGER DEFAULT NULL,
+                    avg_cost REAL DEFAULT NULL,
+                    pnl_rate REAL DEFAULT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
@@ -418,6 +421,22 @@ class TradingDB(Database):
             """)
 
         logger.debug("TradingDB tables initialized")
+
+        # 기존 DB 마이그레이션
+        self._migrate_orders_table()
+
+    def _migrate_orders_table(self) -> None:
+        """orders 테이블에 pnl 컬럼 추가 마이그레이션"""
+        with self.get_cursor() as cursor:
+            # 컬럼 존재 여부 확인
+            cursor.execute("PRAGMA table_info(orders)")
+            columns = [row[1] for row in cursor.fetchall()]
+
+            if "pnl" not in columns:
+                cursor.execute("ALTER TABLE orders ADD COLUMN pnl INTEGER DEFAULT NULL")
+                cursor.execute("ALTER TABLE orders ADD COLUMN avg_cost REAL DEFAULT NULL")
+                cursor.execute("ALTER TABLE orders ADD COLUMN pnl_rate REAL DEFAULT NULL")
+                logger.info("orders 테이블에 pnl 컬럼 추가 완료")
 
     def get_table_stats(self) -> dict:
         """매매 테이블별 통계 조회"""

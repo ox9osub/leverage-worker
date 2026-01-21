@@ -166,8 +166,14 @@ class DailyReportGenerator:
             else:
                 report.sell_trades += 1
 
-                # 매도 손익 계산 (가중평균 매입가 기준)
-                pnl, avg_cost = self._calculate_trade_pnl(row)
+                # 매도 손익 계산: DB에 저장된 값 우선 사용 (없으면 FIFO 계산)
+                if row.get("pnl") is not None:
+                    pnl = row["pnl"]
+                    avg_cost = row.get("avg_cost") or 0
+                else:
+                    # fallback: 기존 FIFO 계산 (마이그레이션 이전 데이터용)
+                    pnl, avg_cost = self._calculate_trade_pnl(row)
+
                 trade.profit_loss = pnl
                 if avg_cost > 0:
                     trade.profit_rate = ((row["filled_price"] - avg_cost) / avg_cost) * 100

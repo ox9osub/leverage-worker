@@ -55,6 +55,8 @@ class ManagedOrder:
     updated_at: datetime = field(default_factory=datetime.now)
     branch_no: str = ""
     avg_price: float = 0.0  # 매도 주문 시 손익 계산용 평균 매입가
+    pnl: Optional[int] = None  # 실현손익 (매도 체결 시)
+    pnl_rate: Optional[float] = None  # 수익률 (매도 체결 시)
 
     @property
     def is_pending(self) -> bool:
@@ -846,9 +848,14 @@ class OrderManager:
                 order_id=order.order_id,
             )
         else:
-            # 매도 체결 → 포지션 업데이트/제거
+            # 매도 체결 → 포지션 업데이트/제거 + 손익 계산
             position = self._position_manager.get_position(order.stock_code)
             if position:
+                # 손익 계산 (포지션 삭제 전에 계산)
+                if avg_price_for_pnl > 0:
+                    order.pnl = int((order.filled_price - avg_price_for_pnl) * filled_qty)
+                    order.pnl_rate = ((order.filled_price - avg_price_for_pnl) / avg_price_for_pnl) * 100
+
                 remaining = position.quantity - filled_qty
                 if remaining <= 0:
                     self._position_manager.remove_position(order.stock_code)
@@ -988,12 +995,18 @@ class OrderManager:
                     filled_quantity = ?,
                     filled_price = ?,
                     status = ?,
+                    pnl = ?,
+                    avg_cost = ?,
+                    pnl_rate = ?,
                     updated_at = ?
                 WHERE order_id = ?
             """, (
                 order.filled_qty,
                 order.filled_price,
                 order.state.value,
+                order.pnl,
+                order.avg_price if order.pnl is not None else None,
+                order.pnl_rate,
                 now,
                 order.order_id,
             ))
