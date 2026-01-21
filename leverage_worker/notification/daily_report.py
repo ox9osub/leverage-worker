@@ -167,12 +167,14 @@ class DailyReportGenerator:
                 report.sell_trades += 1
 
                 # 매도 손익 계산: DB에 저장된 값 우선 사용 (없으면 FIFO 계산)
-                if row.get("pnl") is not None:
+                # sqlite3.Row는 .get() 메서드가 없으므로 keys() 체크
+                row_keys = row.keys()
+                if "pnl" in row_keys and row["pnl"] is not None:
                     pnl = row["pnl"]
-                    avg_cost = row.get("avg_cost") or 0
+                    avg_cost = row["avg_cost"] if "avg_cost" in row_keys and row["avg_cost"] else 0
                 else:
                     # fallback: 기존 FIFO 계산 (마이그레이션 이전 데이터용)
-                    pnl, avg_cost = self._calculate_trade_pnl(row)
+                    pnl, avg_cost = self._calculate_trade_pnl(dict(row))
 
                 trade.profit_loss = pnl
                 if avg_cost > 0:
@@ -390,7 +392,7 @@ class DailyReportGenerator:
 
         total_pnl = 0
         for row in rows:
-            pnl, _ = self._calculate_trade_pnl(row)
+            pnl, _ = self._calculate_trade_pnl(dict(row))
             total_pnl += pnl
 
         logger.debug(f"Today's realized PnL loaded from DB: {total_pnl:,}원")

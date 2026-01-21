@@ -78,6 +78,7 @@ class ExitMonitor:
         self._ws: Optional[websockets.ClientConnection] = None
         self._kws: Optional[ka.KISWebSocket] = None
         self._running = False
+        self._ws_stop_event = threading.Event()  # WebSocket 종료 시그널
         self._subscribed_stocks: Set[str] = set()
 
     def start(self) -> None:
@@ -87,27 +88,40 @@ class ExitMonitor:
             return
 
         self._running = True
+        self._ws_stop_event.clear()  # 종료 시그널 초기화
         logger.info("[ExitMonitor] Started (waiting for positions)")
 
     def stop(self) -> None:
         """모니터링 중지 - WebSocket graceful close 포함"""
         self._running = False
+        self._ws_stop_event.set()  # 종료 시그널 설정
+
+        # KISWebSocket 재연결 방지 및 종료
+        if self._kws is not None:
+            try:
+                self._kws.retry_count = self._kws.max_retries
+                # KISWebSocket 내부 종료 플래그 설정
+                self._kws._running = False
+            except Exception:
+                pass
 
         # WebSocket graceful close
         if self._ws is not None:
             try:
-                # KISWebSocket 재연결 방지
-                if self._kws is not None:
-                    self._kws.retry_count = self._kws.max_retries
-
-                # async close를 동기 코드에서 실행
-                asyncio.run(self._ws.close())
-                logger.info("[ExitMonitor] WebSocket connection closed gracefully")
+                # 새 이벤트 루프에서 close 실행
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    loop.run_until_complete(asyncio.wait_for(self._ws.close(), timeout=2.0))
+                    logger.info("[ExitMonitor] WebSocket connection closed gracefully")
+                finally:
+                    loop.close()
             except Exception as e:
-                logger.warning(f"[ExitMonitor] WebSocket close error (expected): {e}")
+                logger.debug(f"[ExitMonitor] WebSocket close: {e}")
             finally:
                 self._ws = None
-                self._kws = None
+
+        self._kws = None
 
         # 스레드 종료 대기
         if self._ws_thread and self._ws_thread.is_alive():
@@ -116,11 +130,13 @@ class ExitMonitor:
                 logger.warning("[ExitMonitor] WebSocket thread did not terminate in time")
         self._ws_thread = None
 
+        # 상태 초기화
         with self._lock:
             self._monitored.clear()
             self._exit_in_progress.clear()
             self._subscribed_stocks.clear()
 
+        self._ws_stop_event.clear()  # 다음 시작을 위해 리셋
         logger.info("[ExitMonitor] Stopped")
 
     def add_position(self, config: ExitMonitorConfig) -> None:
