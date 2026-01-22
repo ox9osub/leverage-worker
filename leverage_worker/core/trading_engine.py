@@ -1204,7 +1204,7 @@ class TradingEngine:
             )
 
             if order_id:
-                logger.info(f"[{stock_code}] 지정가 추격 매수 완료: {order_id}")
+                logger.info(f"[{stock_code}] 지정가 추격 매수 프로세스 종료: {order_id}")
                 self._slack.notify_buy(
                     stock_code=stock_code,
                     stock_name=stock_name,
