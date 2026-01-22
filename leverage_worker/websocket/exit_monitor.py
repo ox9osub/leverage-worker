@@ -41,6 +41,7 @@ class ExitMonitorConfig:
     take_profit_pct: float  # 0.003 = 0.3%
     stop_loss_pct: float  # 0.01 = 1.0%
     max_holding_minutes: int  # 60
+    signal_price: float = 0.0  # 시그널 발생 시점 가격 (TP 계산용, 0이면 avg_price 사용)  # 시그널 발생 시점 가격 (TP 계산용, 0이면 avg_price 사용)  # 60
 
 
 class ExitMonitor:
@@ -166,10 +167,18 @@ class ExitMonitor:
                 # 실행 중이면 동적 구독 추가
                 self._subscribe_stock(stock_code)
 
+            # TP 달성 가격 계산
+            tp_base = config.signal_price if config.signal_price > 0 else config.avg_price
+            tp_target = int(tp_base * (1 + config.take_profit_pct))
+
             logger.info(
                 f"[ExitMonitor] Added {stock_code} "
                 f"(TP: {config.take_profit_pct:.2%}, SL: {config.stop_loss_pct:.2%}, "
                 f"Timeout: {config.max_holding_minutes}min)"
+            )
+            logger.info(
+                f"[ExitMonitor] {stock_code} - 시그널가: {config.signal_price:,.0f}, "
+                f"매수가: {config.avg_price:,.0f}, TP목표가: {tp_target:,}"
             )
 
     def remove_position(self, stock_code: str) -> None:
@@ -373,15 +382,18 @@ class ExitMonitor:
         Returns:
             (reason, is_take_profit) 또는 None
         """
-        profit_rate = (current_price - config.avg_price) / config.avg_price
+        # TP는 시그널 가격 기준, SL은 실제 매수가 기준
+        tp_base_price = config.signal_price if config.signal_price > 0 else config.avg_price
+        tp_profit_rate = (current_price - tp_base_price) / tp_base_price
+        sl_profit_rate = (current_price - config.avg_price) / config.avg_price
 
-        # 손절 (우선 확인)
-        if profit_rate <= -config.stop_loss_pct:
-            return (f"손절: {profit_rate:.2%}", False)
+        # 손절 (우선 확인) - 실제 매수가 기준
+        if sl_profit_rate <= -config.stop_loss_pct:
+            return (f"손절: {sl_profit_rate:.2%}", False)
 
-        # 익절
-        if profit_rate >= config.take_profit_pct:
-            return (f"익절: {profit_rate:.2%}", True)
+        # 익절 - 시그널 가격 기준
+        if tp_profit_rate >= config.take_profit_pct:
+            return (f"익절: {tp_profit_rate:.2%}", True)
 
         # 시간 청산
         holding_seconds = (current_time - config.entry_time).total_seconds()

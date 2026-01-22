@@ -1028,6 +1028,7 @@ class KISBroker:
                 return []
 
             body = resp.get_body()
+            output1 = getattr(body, "output1", None)
             output2 = getattr(body, "output2", None)
 
             # output2 검증
@@ -1045,6 +1046,11 @@ class KISBroker:
                     return obj.get(key, default)
                 return getattr(obj, key, default)
 
+            # output1에서 당일 등락률 추출 (전 분봉 공통 적용)
+            change_rate = 0.0
+            if output1:
+                change_rate = float(get_value(output1, "prdy_ctrt", 0))
+
             candles = []
             for item in output2:
                 try:
@@ -1056,6 +1062,7 @@ class KISBroker:
                         "low_price": int(get_value(item, "stck_lwpr", 0)),
                         "close_price": int(get_value(item, "stck_prpr", 0)),
                         "volume": int(get_value(item, "cntg_vol", 0)),
+                        "change_rate": change_rate,  # output1의 당일 등락률 사용
                     }
                     if candle["close_price"] > 0:
                         candles.append(candle)

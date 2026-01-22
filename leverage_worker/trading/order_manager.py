@@ -57,6 +57,7 @@ class ManagedOrder:
     avg_price: float = 0.0  # 매도 주문 시 손익 계산용 평균 매입가
     pnl: Optional[int] = None  # 실현손익 (매도 체결 시)
     pnl_rate: Optional[float] = None  # 수익률 (매도 체결 시)
+    signal_price: int = 0  # 시그널 발생 시점 가격 (TP 계산용)
 
     @property
     def is_pending(self) -> bool:
@@ -118,6 +119,7 @@ class OrderManager:
         quantity: int,
         strategy_name: str,
         check_deposit: bool = True,
+        signal_price: int = 0,
     ) -> Optional[str]:
         """
         매수 주문 실행
@@ -128,6 +130,7 @@ class OrderManager:
             quantity: 수량
             strategy_name: 전략 이름
             check_deposit: 예수금 확인 여부 (기본: True)
+            signal_price: 시그널 발생 시점 가격 (TP 계산용)
 
         Returns:
             주문 ID 또는 None (실패 시)
@@ -233,6 +236,7 @@ class OrderManager:
             price=result.price,
             strategy_name=strategy_name,
             state=OrderState.SUBMITTED,
+            signal_price=signal_price,
         )
 
         self._active_orders[result.order_id] = order
@@ -268,6 +272,7 @@ class OrderManager:
         strategy_name: str,
         interval: float = 0.5,
         max_retry: int = 10,
+        signal_price: int = 0,
     ) -> Optional[str]:
         """
         매도호가1 추격 매수 (지정가 주문 + 반복 정정)
@@ -284,6 +289,7 @@ class OrderManager:
             strategy_name: 전략 이름
             interval: 정정 간격 (초)
             max_retry: 최대 정정 횟수
+            signal_price: 시그널 발생 시점 가격 (TP 계산용)
 
         Returns:
             주문 ID 또는 None (실패 시)
@@ -334,6 +340,7 @@ class OrderManager:
             price=ask_price,
             strategy_name=strategy_name,
             state=OrderState.SUBMITTED,
+            signal_price=signal_price,
         )
         self._active_orders[order_id] = order
         self._pending_stocks.add(stock_code)

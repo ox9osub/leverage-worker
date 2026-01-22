@@ -715,6 +715,7 @@ class TradingEngine:
                     continue
 
                 params = strategy_config.get("params", {})
+                # 기존 포지션은 signal_price를 알 수 없으므로 avg_price 사용
                 config = ExitMonitorConfig(
                     stock_code=stock_code,
                     strategy_name=position.strategy_name,
@@ -724,6 +725,7 @@ class TradingEngine:
                     take_profit_pct=params.get("take_profit_pct", 0.003),
                     stop_loss_pct=params.get("stop_loss_pct", 0.01),
                     max_holding_minutes=params.get("max_holding_minutes", 60),
+                    signal_price=position.avg_price,  # 기존 포지션은 avg_price로 대체
                 )
                 self._exit_monitor.add_position(config)
                 logger.info(f"[ExitMonitor] Registered existing position: {stock_code}")
@@ -865,6 +867,7 @@ class TradingEngine:
                 take_profit_pct=params.get("take_profit_pct", 0.003),
                 stop_loss_pct=params.get("stop_loss_pct", 0.01),
                 max_holding_minutes=params.get("max_holding_minutes", 60),
+                signal_price=float(order.signal_price) if order.signal_price > 0 else order.filled_price,
             )
             self._exit_monitor.add_position(config)
             logger.info(f"[ExitMonitor] Registered: {order.stock_code}")
@@ -1197,6 +1200,7 @@ class TradingEngine:
                 strategy_name=strategy.name,
                 interval=0.5,
                 max_retry=10,
+                signal_price=context.current_price,
             )
 
             if order_id:
@@ -1330,8 +1334,7 @@ class TradingEngine:
 
         logger.info(f"Overnight 포지션 {len(positions)}개 확인")
 
-        for pos in positions:
-            stock_code = pos.stock_code
+        for stock_code, pos in positions.items():
             strategy_name = pos.strategy_name
 
             if not strategy_name:
