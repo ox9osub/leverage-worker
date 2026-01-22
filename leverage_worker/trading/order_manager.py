@@ -432,6 +432,32 @@ class OrderManager:
                 new_order_qty = latest_unfilled
                 total_filled = latest_filled
 
+            # 정정 전 체결분을 포지션에 즉시 추가 (누락 방지)
+            if latest_filled > order.filled_qty:
+                new_filled = latest_filled - order.filled_qty
+
+                # 체결가 조회
+                broker_orders = self._broker.get_today_orders()
+                broker_order = next(
+                    (o for o in broker_orders if o.order_id == order_id),
+                    None
+                )
+                filled_price = broker_order.filled_price if broker_order else current_price
+
+                # 포지션에 추가
+                self._position_manager.add_position(
+                    stock_code=stock_code,
+                    stock_name=stock_name,
+                    quantity=new_filled,
+                    price=filled_price,
+                    strategy_name=strategy_name,
+                )
+                order.filled_qty = latest_filled
+                logger.info(
+                    f"[{stock_code}] 정정 전 부분 체결 포지션 추가: "
+                    f"{new_filled}주 @ {filled_price:,}원 (누적: {order.filled_qty}주)"
+                )
+
             # 정정 주문
             new_order_id = self._broker.modify_order(order_id, order_branch, new_order_qty, new_ask_price)
             if new_order_id:
@@ -458,6 +484,33 @@ class OrderManager:
 
         # 최종 상태 로그
         final_filled, final_unfilled = self._broker.get_order_status(order_id)
+
+        # 루프 종료 후 아직 포지션에 추가되지 않은 최종 체결분 처리
+        if final_filled > order.filled_qty:
+            remaining_filled = final_filled - order.filled_qty
+
+            # 체결가 조회
+            broker_orders = self._broker.get_today_orders()
+            broker_order = next(
+                (o for o in broker_orders if o.order_id == order_id),
+                None
+            )
+            filled_price = broker_order.filled_price if broker_order else current_price
+
+            # 포지션에 추가
+            self._position_manager.add_position(
+                stock_code=stock_code,
+                stock_name=stock_name,
+                quantity=remaining_filled,
+                price=filled_price,
+                strategy_name=strategy_name,
+            )
+            order.filled_qty = final_filled
+            logger.info(
+                f"[{stock_code}] 최종 체결분 포지션 추가: "
+                f"{remaining_filled}주 @ {filled_price:,}원 (총 체결: {order.filled_qty}주)"
+            )
+
         if final_unfilled > 0:
             logger.warning(
                 f"[{stock_code}] 매수 부분 체결: {final_filled}주 체결, {final_unfilled}주 미체결"
