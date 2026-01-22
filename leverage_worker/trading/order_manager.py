@@ -58,6 +58,7 @@ class ManagedOrder:
     pnl: Optional[int] = None  # 실현손익 (매도 체결 시)
     pnl_rate: Optional[float] = None  # 수익률 (매도 체결 시)
     signal_price: int = 0  # 시그널 발생 시점 가격 (TP 계산용)
+    original_quantity: int = 0  # 원래 목표 수량 (정정 시에도 유지, 알림용)
 
     @property
     def is_pending(self) -> bool:
@@ -341,6 +342,7 @@ class OrderManager:
             strategy_name=strategy_name,
             state=OrderState.SUBMITTED,
             signal_price=signal_price,
+            original_quantity=quantity,  # 원래 목표 수량 저장 (정정 시에도 유지)
         )
         self._active_orders[order_id] = order
         self._pending_stocks.add(stock_code)
