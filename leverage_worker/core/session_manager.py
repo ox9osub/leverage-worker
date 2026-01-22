@@ -168,8 +168,8 @@ class SessionManager:
 
         logger.debug(f"Token saved to {token_path}")
 
-    def _read_token(self) -> Optional[str]:
-        """저장된 토큰 읽기"""
+    def _read_token(self) -> Optional[tuple[str, datetime]]:
+        """저장된 토큰 읽기 (토큰, 만료시간 반환)"""
         token_path = self._get_token_file_path()
 
         if not token_path.exists():
@@ -182,11 +182,10 @@ class SessionManager:
             if data is None:
                 return None
 
-            exp_dt = datetime.strftime(data["valid-date"], "%Y-%m-%d %H:%M:%S")
-            now_dt = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            valid_date: datetime = data["valid-date"]
 
-            if exp_dt > now_dt:
-                return data["token"]
+            if valid_date > datetime.now():
+                return (data["token"], valid_date)
             return None
 
         except Exception as e:
@@ -206,16 +205,18 @@ class SessionManager:
         """
         with self._lock:
             # 기존 토큰 확인
-            saved_token = self._read_token()
+            saved = self._read_token()
 
-            if saved_token is None:
+            if saved is None:
                 # 신규 토큰 발급
                 if not self._request_new_token():
                     return False
             else:
-                self._token = saved_token
-                self._token_expires_at = datetime.now() + timedelta(hours=24)
-                logger.info("Using existing token")
+                token, expires_at = saved
+                self._token = token
+                self._token_expires_at = expires_at
+                remaining = expires_at - datetime.now()
+                logger.info(f"Using existing token (expires: {expires_at}, remaining: {remaining})")
 
             # 헤더에 인증 정보 설정
             self._base_headers["authorization"] = f"Bearer {self._token}"
