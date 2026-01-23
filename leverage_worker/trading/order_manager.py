@@ -769,11 +769,49 @@ class OrderManager:
             if unfilled_qty == 0:
                 logger.info(f"[{stock_code}] 취소 실패했으나 전량 체결됨")
                 return order_id
+        else:
+            # 취소 성공 후 - 체결 상태 재확인 (취소 중 추가 체결 가능)
+            final_filled, final_unfilled = self._broker.get_order_status(order_id)
+            if final_filled != filled_qty:
+                logger.info(f"[{stock_code}] 취소 중 추가 체결: {filled_qty}주 → {final_filled}주")
+                # 추가 체결분 처리
+                if final_filled > filled_qty and order_id in self._active_orders:
+                    order = self._active_orders[order_id]
+                    broker_order = next(
+                        (o for o in self._broker.get_today_orders() if o.order_id == order_id),
+                        None
+                    )
+                    if broker_order:
+                        order.filled_qty = final_filled
+                        order.filled_price = broker_order.filled_price
+                        self._handle_fill(order, final_filled - filled_qty)  # 추가 체결분만
+                filled_qty = final_filled
+                unfilled_qty = final_unfilled
+
+            # 전량 체결 완료 확인
+            if unfilled_qty == 0:
+                logger.info(f"[{stock_code}] 취소 완료 후 전량 체결 확인됨: {filled_qty}주")
+                self._pending_stocks.discard(stock_code)
+                if order_id in self._active_orders:
+                    del self._active_orders[order_id]
+                return order_id
 
         # pending 상태 해제 (시장가 재주문을 위해)
         self._pending_stocks.discard(stock_code)
         if order_id in self._active_orders:
             del self._active_orders[order_id]
+
+        # 시장가 매도 전 실제 잔고 확인
+        position = self._position_manager.get_position(stock_code)
+        actual_qty = position.quantity if position else 0
+
+        if actual_qty <= 0:
+            logger.warning(f"[{stock_code}] 시장가 전환 취소: 잔고 없음 (전량 체결됨)")
+            return order_id
+
+        if actual_qty < unfilled_qty:
+            logger.warning(f"[{stock_code}] 시장가 수량 조정: {unfilled_qty}주 → {actual_qty}주 (잔고 부족)")
+            unfilled_qty = actual_qty
 
         # 미체결 수량만큼 시장가 매도
         logger.info(f"[{stock_code}] 시장가 매도 전환: {unfilled_qty}주")
