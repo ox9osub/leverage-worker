@@ -66,32 +66,40 @@ def attach_slack_handler(
     """
     로거에 Slack 핸들러 추가
 
+    propagate = False로 설정된 자식 로거들도 Slack 메시지를 받을 수 있도록
+    모든 leverage_worker.* 로거에 SlackHandler를 연결합니다.
+
     Args:
         notifier: SlackNotifier 인스턴스
-        logger_name: 핸들러를 추가할 로거 이름
+        logger_name: 핸들러를 추가할 로거 이름 (자식 로거들도 포함)
         level: 전송할 최소 로그 레벨 (기본: ERROR)
     """
     if not notifier.is_enabled:
         return
 
-    logger = logging.getLogger(logger_name)
-
-    # 이미 SlackHandler가 있는지 확인
-    for handler in logger.handlers:
-        if isinstance(handler, SlackHandler):
-            return
-
-    # Slack 핸들러 추가
+    # SlackHandler 생성 (모든 로거에서 재사용)
     slack_handler = SlackHandler(notifier, level)
     slack_handler.setFormatter(logging.Formatter(
         fmt="%(message)s",
         datefmt="%Y-%m-%d %H:%M:%S"
     ))
-
-    # 민감정보 마스킹 필터 추가
     slack_handler.addFilter(SensitiveDataFilter())
 
-    logger.addHandler(slack_handler)
+    # 모든 leverage_worker.* 로거에 핸들러 추가
+    for name, logger_obj in logging.Logger.manager.loggerDict.items():
+        # leverage_worker로 시작하는 로거만
+        if not name.startswith(logger_name):
+            continue
+
+        # PlaceHolder가 아닌 실제 Logger 객체만
+        if not isinstance(logger_obj, logging.Logger):
+            continue
+
+        # 이미 SlackHandler가 있으면 스킵
+        if any(isinstance(h, SlackHandler) for h in logger_obj.handlers):
+            continue
+
+        logger_obj.addHandler(slack_handler)
 
 
 class SensitiveDataFilter(logging.Filter):
