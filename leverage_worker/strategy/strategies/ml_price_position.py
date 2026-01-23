@@ -160,12 +160,36 @@ class MLPricePositionStrategy(BaseStrategy):
             current_time=context.current_time,
         )
 
+        # 전일 종가 대비 등락률 계산
+        prev_close = context.daily_candles[-1].close_price if context.daily_candles else context.current_price
+        change_rate = (context.current_price - prev_close) / prev_close * 100 if prev_close > 0 else 0
+
+        # 가격 위치 비율 계산
+        daily_range = daily_high - daily_low
+        position_pct = (context.current_price - daily_low) / daily_range if daily_range > 0 else 0
+
         if should_signal and direction == 'LONG':
+            logger.info(
+                f"[{stock_code}] LONG 시그널 | "
+                f"현재가: {context.current_price:,}({change_rate:+.2f}%) | "
+                f"변동성: {vol_prob:.1%} | "
+                f"고/저: {daily_high:,}/{daily_low:,} | "
+                f"위치: {position_pct:.1%}"
+            )
             return TradingSignal.buy(
                 stock_code=stock_code,
                 quantity=self._position_size,
                 reason=f"ML 변동성 {vol_prob:.1%}, 가격 위치 하단",
                 confidence=vol_prob,
+            )
+
+        if direction == 'SHORT':
+            logger.info(
+                f"[{stock_code}] SHORT 시그널 (미지원) | "
+                f"현재가: {context.current_price:,}({change_rate:+.2f}%) | "
+                f"변동성: {vol_prob:.1%} | "
+                f"고/저: {daily_high:,}/{daily_low:,} | "
+                f"위치: {position_pct:.1%}"
             )
 
         return TradingSignal.hold(stock_code, f"진입 조건 미충족 (vol_prob={vol_prob:.1%})")

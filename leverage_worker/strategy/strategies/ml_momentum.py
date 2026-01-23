@@ -147,17 +147,35 @@ class MLMomentumStrategy(BaseStrategy):
             current_time=context.current_time,
         )
 
-        if should_signal and direction == 'LONG':
-            # 모멘텀 정보 추출
-            last_row = df.iloc[-1]
-            mom5 = last_row.get('momentum_5', 0)
-            mom10 = last_row.get('momentum_10', 0)
+        # 모멘텀 정보 추출
+        last_row = df.iloc[-1]
+        mom5 = last_row.get('momentum_5', 0)
+        mom10 = last_row.get('momentum_10', 0)
 
+        # 전일 종가 대비 등락률 계산
+        prev_close = context.daily_candles[-1].close_price if context.daily_candles else context.current_price
+        change_rate = (context.current_price - prev_close) / prev_close * 100 if prev_close > 0 else 0
+
+        if should_signal and direction == 'LONG':
+            logger.info(
+                f"[{stock_code}] LONG 시그널 | "
+                f"현재가: {context.current_price:,}({change_rate:+.2f}%) | "
+                f"변동성: {vol_prob:.1%} | "
+                f"모멘텀: {mom5:+.0f}/{mom10:+.0f}"
+            )
             return TradingSignal.buy(
                 stock_code=stock_code,
                 quantity=self._position_size,
                 reason=f"ML 변동성 {vol_prob:.1%}, 모멘텀 +{mom5:.0f}/+{mom10:.0f}",
                 confidence=vol_prob,
+            )
+
+        if direction == 'SHORT':
+            logger.info(
+                f"[{stock_code}] SHORT 시그널 (미지원) | "
+                f"현재가: {context.current_price:,}({change_rate:+.2f}%) | "
+                f"변동성: {vol_prob:.1%} | "
+                f"모멘텀: {mom5:+.0f}/{mom10:+.0f}"
             )
 
         return TradingSignal.hold(stock_code, f"진입 조건 미충족 (vol_prob={vol_prob:.1%})")
