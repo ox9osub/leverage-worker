@@ -449,8 +449,10 @@ class OrderManager:
                     stock_code=stock_code,
                     stock_name=stock_name,
                     quantity=new_filled,
-                    price=filled_price,
+                    avg_price=filled_price,
+                    current_price=filled_price,
                     strategy_name=strategy_name,
+                    order_id=order_id,
                 )
                 order.filled_qty = latest_filled
                 logger.info(
@@ -502,8 +504,10 @@ class OrderManager:
                 stock_code=stock_code,
                 stock_name=stock_name,
                 quantity=remaining_filled,
-                price=filled_price,
+                avg_price=filled_price,
+                current_price=filled_price,
                 strategy_name=strategy_name,
+                order_id=order_id,
             )
             order.filled_qty = final_filled
             logger.info(
