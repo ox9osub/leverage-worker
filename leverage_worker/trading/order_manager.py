@@ -516,9 +516,54 @@ class OrderManager:
             )
 
         if final_unfilled > 0:
-            logger.warning(
-                f"[{stock_code}] 매수 부분 체결: {final_filled}주 체결, {final_unfilled}주 미체결"
-            )
+            # 1) 미체결분 취소 요청
+            cancel_result = self._broker.cancel_order(order_id, order_branch, final_unfilled)
+
+            # 2) 취소 후 최종 체결 상태 재확인 (취소 중 체결된 수량 확인)
+            post_cancel_filled, post_cancel_unfilled = self._broker.get_order_status(order_id)
+
+            # 3) 취소 동안 추가 체결된 수량이 있으면 포지션에 추가
+            if post_cancel_filled > order.filled_qty:
+                additional_filled = post_cancel_filled - order.filled_qty
+
+                # 체결가 조회
+                broker_orders = self._broker.get_today_orders()
+                broker_order = next(
+                    (o for o in broker_orders if o.order_id == order_id), None
+                )
+                filled_price = broker_order.filled_price if broker_order else current_price
+
+                # 포지션에 추가
+                self._position_manager.add_position(
+                    stock_code=stock_code,
+                    stock_name=stock_name,
+                    quantity=additional_filled,
+                    avg_price=filled_price,
+                    current_price=filled_price,
+                    strategy_name=strategy_name,
+                    order_id=order_id,
+                )
+                order.filled_qty = post_cancel_filled
+                logger.info(
+                    f"[{stock_code}] 취소 중 추가 체결 포지션 추가: "
+                    f"{additional_filled}주 @ {filled_price:,}원 (총 체결: {order.filled_qty}주)"
+                )
+
+            # 4) 상태 업데이트 및 로그
+            if cancel_result:
+                cancelled_qty = final_unfilled - (post_cancel_filled - final_filled)
+                logger.info(
+                    f"[{stock_code}] 추격매수 종료: {post_cancel_filled}주 체결, "
+                    f"{cancelled_qty}주 취소"
+                )
+            else:
+                logger.warning(
+                    f"[{stock_code}] 미체결 취소 실패 - 수동 확인 필요"
+                )
+
+            # 5) pending 상태 정리
+            order.state = OrderState.PARTIAL if order.filled_qty > 0 else OrderState.CANCELLED
+            self._pending_stocks.discard(stock_code)
 
         return order_id
 
