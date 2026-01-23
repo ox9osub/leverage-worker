@@ -382,7 +382,18 @@ class DailyReportGenerator:
         """
         today = datetime.now().strftime("%Y-%m-%d")
 
-        # 방법 1: orders 테이블의 pnl 필드 직접 사용 (더 정확)
+        # 방법 0: daily_summary 테이블에서 먼저 조회 (가장 신뢰할 수 있는 소스)
+        query_summary = """
+            SELECT realized_pnl FROM daily_summary
+            WHERE trade_date = ?
+        """
+        result = self._db.fetch_one(query_summary, (today,))
+        if result and result["realized_pnl"] is not None:
+            total_pnl = int(result["realized_pnl"])
+            logger.info(f"Today's realized PnL loaded from daily_summary: {total_pnl:,}원")
+            return total_pnl
+
+        # 방법 1: orders 테이블의 pnl 필드 직접 사용
         query_direct = """
             SELECT COALESCE(SUM(pnl), 0) as total_pnl FROM orders
             WHERE DATE(created_at) = ? AND status = 'filled' AND side = 'sell'
@@ -390,10 +401,11 @@ class DailyReportGenerator:
         """
 
         result = self._db.fetch_one(query_direct, (today,))
-        if result and result["total_pnl"]:
-            total_pnl = int(result["total_pnl"])
-            logger.info(f"Today's realized PnL loaded from DB (direct): {total_pnl:,}원")
-            return total_pnl
+        if result is not None:
+            total_pnl = int(result["total_pnl"] or 0)
+            if total_pnl != 0:
+                logger.info(f"Today's realized PnL loaded from orders: {total_pnl:,}원")
+                return total_pnl
 
         # 방법 2: pnl 필드가 없으면 FIFO 방식으로 계산 (fallback)
         query = """

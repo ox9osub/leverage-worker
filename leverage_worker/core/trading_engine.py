@@ -143,6 +143,7 @@ class TradingEngine:
 
         # 당일 누적 실현손익 (DB에서 복구 - 장중 재시작 대응)
         self._daily_realized_pnl: int = self._report_generator.get_today_realized_pnl()
+        logger.info(f"Daily realized PnL initialized: {self._daily_realized_pnl:,}원")
 
         # 시그널 핸들러
         signal.signal(signal.SIGINT, self._signal_handler)
