@@ -154,8 +154,26 @@ class ExitMonitor:
             stock_code = config.stock_code
 
             if stock_code in self._monitored:
-                logger.warning(f"[ExitMonitor] {stock_code} already monitored, updating")
-                self._monitored[stock_code] = config
+                # 분할매수 시 수량 누적 + 가중평균 매수가 계산
+                existing = self._monitored[stock_code]
+
+                # 수량 누적
+                total_qty = existing.quantity + config.quantity
+
+                # 가중평균 매수가 계산
+                total_cost = (existing.quantity * existing.avg_price) + (
+                    config.quantity * config.avg_price
+                )
+                new_avg_price = total_cost / total_qty
+
+                # 기존 config 업데이트 (시그널가/entry_time은 첫 매수 기준 유지)
+                existing.quantity = total_qty
+                existing.avg_price = new_avg_price
+
+                logger.info(
+                    f"[ExitMonitor] {stock_code} position updated: "
+                    f"+{config.quantity}주 (total: {total_qty}주, avg: {new_avg_price:,.0f}원)"
+                )
                 return
 
             self._monitored[stock_code] = config
