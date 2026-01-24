@@ -829,6 +829,11 @@ class TradingEngine:
                         reason=f"[실시간] {reason}",
                         strategy_win_rate=win_rate,
                     )
+                else:
+                    # 매도 주문 실패 시 exit_in_progress 해제 (재시도 가능하도록)
+                    if self._exit_monitor:
+                        self._exit_monitor.clear_exit_in_progress(stock_code)
+                    logger.warning(f"[ExitMonitor] {stock_code} 매도 주문 실패 - exit_in_progress 해제")
 
             except Exception as e:
                 logger.error(f"[ExitMonitor] Error processing exit signal: {e}")

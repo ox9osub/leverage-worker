@@ -225,6 +225,12 @@ class ExitMonitor:
         """매도 진행 중인지 확인 (중복 주문 방지)"""
         return stock_code in self._exit_in_progress
 
+    def clear_exit_in_progress(self, stock_code: str) -> None:
+        """매도 주문 실패 시 exit_in_progress 상태 해제"""
+        with self._lock:
+            self._exit_in_progress.discard(stock_code)
+            logger.info(f"[ExitMonitor] exit_in_progress 해제: {stock_code}")
+
     def get_monitored_stocks(self) -> List[str]:
         """모니터링 중인 종목 목록"""
         with self._lock:
