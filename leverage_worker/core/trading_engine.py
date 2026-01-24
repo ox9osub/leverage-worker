@@ -1306,8 +1306,11 @@ class TradingEngine:
         """장 시작 콜백"""
         logger.info("Market opened - syncing positions")
 
-        # 당일 누적 실현손익 리셋
-        self._daily_realized_pnl = 0
+        # 당일 누적 실현손익 - DB에서 조회
+        # - 09:00 정상 시작: DB에 당일 매도 없음 → 0
+        # - 장 중 재시작: DB에 당일 매도 있음 → 복구
+        self._daily_realized_pnl = self._report_generator.get_today_realized_pnl()
+        logger.info(f"Daily realized PnL on market open: {self._daily_realized_pnl:,}원")
 
         # 정규장 시작 알림
         self._slack.send_market_open_notification()
