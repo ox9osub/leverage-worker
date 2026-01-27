@@ -16,6 +16,7 @@ project_root = Path(__file__).parent.parent.parent.parent
 import sys
 sys.path.insert(0, str(project_root))
 
+from leverage_worker.data.database import MarketDataDB
 from leverage_worker.data.minute_candle_repository import MinuteCandleRepository
 from leverage_worker.ml.data_utils import candles_to_dataframe
 from leverage_worker.ml.features import TradingFeatureEngineer
@@ -35,7 +36,8 @@ def check_signal_data(stock_code: str = "122630", target_date: str = "2026-01-27
 
     # 1. DB에서 분봉 데이터 로드
     print("\n[1] DB 분봉 데이터 로드")
-    repo = MinuteCandleRepository()
+    db = MarketDataDB()
+    repo = MinuteCandleRepository(db)
     candles = repo.get_recent_prices(stock_code, count=500)
 
     print(f"  - 로드된 분봉 개수: {len(candles)}")
@@ -164,7 +166,8 @@ def compare_with_backtest(stock_code: str = "122630"):
     print(f"  - 백테스트 데이터 크기: {backtest_df.shape}")
 
     # DB 데이터 로드
-    repo = MinuteCandleRepository()
+    db = MarketDataDB()
+    repo = MinuteCandleRepository(db)
     candles = repo.get_recent_prices(stock_code, count=1000)
     db_df = candles_to_dataframe(candles)
     print(f"  - DB 데이터 크기: {db_df.shape}")
