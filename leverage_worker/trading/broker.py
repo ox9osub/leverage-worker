@@ -594,7 +594,8 @@ class KISBroker:
 
         if not res.is_ok():
             error_msg = res.get_error_message()
-            logger.error(f"Order modify failed: {order_id} - {error_msg}")
+            # 체결 진행 중 정정 실패는 자연스러운 상황 (race condition)
+            logger.warning(f"Order modify failed: {order_id} - {error_msg}")
             return None
 
         try:

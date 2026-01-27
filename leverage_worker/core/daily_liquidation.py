@@ -199,6 +199,7 @@ class DailyLiquidationManager:
             try:
                 order_id = self._order_manager.place_sell_order(
                     stock_code=stock_code,
+                    stock_name=position.stock_name,
                     quantity=position.quantity,
                     strategy_name=position.strategy_name or "liquidation",
                 )

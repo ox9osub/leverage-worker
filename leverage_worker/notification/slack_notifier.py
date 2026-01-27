@@ -170,7 +170,7 @@ class SlackNotifier:
             strategy_display = f"{strategy_name}({strategy_win_rate:.1f}%)"
 
         lines = [
-            f"{self._get_mode_prefix()}[매수주문] {stock_name}({stock_code}) / {quantity}주 / {price:,}원 / {total_amount:,}원",
+            f"{self._get_mode_prefix()}[매수 프로세스 완료] {stock_name}({stock_code}) / {quantity}주 / {price:,}원 / {total_amount:,}원",
             f"전략: {strategy_display}" + (f" / {reason}" if reason else ""),
             timestamp,
         ]
