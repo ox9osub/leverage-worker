@@ -25,7 +25,8 @@
       "Bash(powershell -Command \"Get-ChildItem ''c:\\\\Users\\\\suble\\\\Desktop\\\\work\\\\project\\\\leverage-worker\\\\data\\\\ml_models\\\\''\")",
       "Bash(powershell -Command \"cd ''c:\\\\Users\\\\suble\\\\Desktop\\\\work\\\\project\\\\leverage-worker''; python -c \"\"from leverage_worker.ml import TradingFeatureEngineer, SignalConfig, VolatilityDirectionSignalGenerator; print\\(''ML module import: OK''\\)\"\"\")",
       "Bash(powershell -Command:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(cd:*)"
     ],
     "deny": [],
     "ask": []

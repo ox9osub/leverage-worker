@@ -147,8 +147,8 @@ class MLMomentumStrategy(BaseStrategy):
             current_time=context.current_time,
         )
 
-        # 모멘텀 정보 추출
-        last_row = df.iloc[-1]
+        # 모멘텀 정보 추출 - 전봉 기준
+        last_row = df.iloc[-2]
         mom5 = last_row.get('momentum_5', 0)
         mom10 = last_row.get('momentum_10', 0)
 

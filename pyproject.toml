@@ -13,5 +13,6 @@ dependencies = [
     "requests>=2.32.4",
     "websockets>=15.0.1",
     "lightgbm>=4.0.0",
-    "scikit-learn>=1.4.0",
+    "scikit-learn==1.7.2",
+    "pyarrow>=23.0.0",
 ]
