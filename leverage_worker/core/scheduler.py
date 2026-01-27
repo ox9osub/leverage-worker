@@ -52,6 +52,13 @@ class TradingScheduler:
         self._on_market_close: Optional[Callable[[], None]] = None
         self._on_idle: Optional[Callable[[], None]] = None
 
+        # 특정 시간 콜백 (예: "15:19" -> callback)
+        self._specific_time_callbacks: Dict[str, Callable[[], None]] = {}
+        # 오늘 실행한 시간 추적 (중복 방지)
+        self._executed_times_today: Set[str] = set()
+        # 마지막 체크 날짜 (자정 지나면 리셋)
+        self._last_check_date: Optional[str] = None
+
         # 마지막 장 마감 처리 날짜 (중복 방지)
         self._last_close_date: Optional[str] = None
 
@@ -84,6 +91,19 @@ class TradingScheduler:
     def set_on_idle(self, callback: Callable[[], None]) -> None:
         """대기 상태 콜백 설정 (장외 1분마다)"""
         self._on_idle = callback
+
+    def register_specific_time_callback(
+        self, time_str: str, callback: Callable[[], None]
+    ) -> None:
+        """
+        특정 시간에 실행할 콜백 등록
+
+        Args:
+            time_str: "HH:MM" 형식 (예: "15:19")
+            callback: 실행할 콜백 함수
+        """
+        self._specific_time_callbacks[time_str] = callback
+        logger.info(f"Registered specific time callback: {time_str}")
 
     def start(self) -> None:
         """스케줄러 시작"""
@@ -207,6 +227,67 @@ class TradingScheduler:
                     except Exception as e:
                         stock_code = futures[future]
                         logger.error(f"Stock tick error [{stock_code}]: {e}")
+
+        # 3. 특정 시간 콜백 처리
+        self._check_specific_time_callbacks(now)
+
+    def _check_specific_time_callbacks(self, now: datetime) -> None:
+        """특정 시간 콜백 체크 및 실행"""
+        # 날짜 변경 시 실행 기록 리셋
+        current_date = now.strftime("%Y%m%d")
+        if self._last_check_date != current_date:
+            self._executed_times_today.clear()
+            self._last_check_date = current_date
+
+        current_time = now.strftime("%H:%M")
+
+        # 등록된 시간 콜백 확인
+        for time_str, callback in self._specific_time_callbacks.items():
+            # 이미 오늘 실행했으면 skip
+            if time_str in self._executed_times_today:
+                continue
+
+            # 정확한 시간 일치
+            if current_time == time_str:
+                logger.info(f"Executing specific time callback: {time_str}")
+                try:
+                    callback()
+                    self._executed_times_today.add(time_str)
+                except Exception as e:
+                    logger.error(f"Specific time callback error [{time_str}]: {e}")
+                    self._executed_times_today.add(time_str)  # 실패해도 재시도 방지
+                continue
+
+            # 놓친 경우 처리 (5초 이내면 실행)
+            target_hour, target_minute = map(int, time_str.split(":"))
+            time_diff_seconds = (
+                (now.hour - target_hour) * 3600
+                + (now.minute - target_minute) * 60
+                + now.second
+            )
+
+            # 0~5초 사이면 늦었지만 실행 (WARNING)
+            if 0 < time_diff_seconds <= 5:
+                logger.warning(
+                    f"Executing delayed specific time callback: {time_str} "
+                    f"(delayed by {time_diff_seconds}s)"
+                )
+                try:
+                    callback()
+                    self._executed_times_today.add(time_str)
+                except Exception as e:
+                    logger.error(f"Specific time callback error [{time_str}]: {e}")
+                    self._executed_times_today.add(time_str)
+                continue
+
+            # 5~10초 놓친 경우 - ERROR 로그만 (실행 안 함)
+            if 5 < time_diff_seconds <= 10:
+                if time_str not in self._executed_times_today:
+                    logger.error(
+                        f"Missed specific time callback: {time_str} "
+                        f"(missed by {time_diff_seconds}s) - TOO LATE"
+                    )
+                    self._executed_times_today.add(time_str)  # 로그 중복 방지
 
     def _process_idle(self, now: datetime) -> None:
         """장외 대기 처리"""

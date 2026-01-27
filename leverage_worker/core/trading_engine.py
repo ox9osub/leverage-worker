@@ -15,6 +15,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Set
 
 from leverage_worker.config.settings import Settings, TradingMode
+from leverage_worker.core.daily_liquidation import DailyLiquidationManager, LiquidationResult
 from leverage_worker.core.emergency import EmergencyStop, create_emergency_stop_handler
 from leverage_worker.core.health_checker import (
     HealthChecker,
@@ -138,6 +139,12 @@ class TradingEngine:
         # 16. 동시성 제어 (스케줄러/WebSocket 공유 리소스 보호)
         self._tick_lock = threading.Lock()
 
+        # 17. Daily Liquidation Manager
+        self._liquidation_manager: Optional["DailyLiquidationManager"] = None
+
+        # 18. 청산 진행 플래그 (전략 실행 skip용)
+        self._liquidation_in_progress = False
+
         # 세션 ID
         self._session_id = str(uuid.uuid4())[:8]
 
@@ -219,11 +226,19 @@ class TradingEngine:
             )
             self._order_manager.set_on_fill_callback(self._on_order_fill)
 
-            # 5-1. 일봉 데이터 로드 (전략 판단용)
+            # 5-1. Daily Liquidation Manager 초기화
+            self._liquidation_manager = DailyLiquidationManager(
+                order_manager=self._order_manager,
+                position_manager=self._position_manager,
+                slack_notifier=self._slack,
+            )
+            logger.info("DailyLiquidationManager initialized")
+
+            # 5-2. 일봉 데이터 로드 (전략 판단용)
             logger.info("Loading daily candle data...")
             self._load_daily_candles()
 
-            # 5-2. 분봉 이력 로드 (초기 데이터 확보)
+            # 5-3. 분봉 이력 로드 (초기 데이터 확보)
             logger.info("Loading minute candle history...")
             self._load_minute_candles()
 
@@ -236,6 +251,10 @@ class TradingEngine:
             self._scheduler.set_on_market_open(self._on_market_open)
             self._scheduler.set_on_market_close(self._on_market_close)
             self._scheduler.set_on_idle(self._on_idle)
+
+            # 7-1. 15:19 당일 청산 콜백 등록
+            self._scheduler.register_specific_time_callback("15:19", self._on_daily_liquidation)
+            logger.info("Registered 15:19 daily liquidation callback")
 
             # 8. Slack 시작 알림
             self._slack.notify_start(
@@ -1001,6 +1020,11 @@ class TradingEngine:
 
         Note: 체결 확인은 스케줄러에서 병렬 처리 전 1회 호출
         """
+        # 청산 진행 중이면 전략 실행 skip
+        if self._liquidation_in_progress:
+            logger.debug(f"[{stock_code}] Skipping stock tick: liquidation in progress")
+            return
+
         with self._tick_lock:
             try:
                 # 1. 분봉 데이터 조회 (30개)
@@ -1424,6 +1448,79 @@ class TradingEngine:
         except Exception as e:
             logger.error(f"Market close error: {e}")
             self._slack.notify_error("장 마감 처리 오류", str(e))
+
+    def _on_daily_liquidation(self) -> None:
+        """15:19 당일 청산 콜백"""
+        try:
+            logger.info("=" * 60)
+            logger.info("Starting daily liquidation at 15:19")
+            logger.info("=" * 60)
+
+            # 청산 진행 플래그 설정 (전략 실행 skip)
+            self._liquidation_in_progress = True
+
+            # ExitMonitor 정지 (중복 매도 방지)
+            if self._exit_monitor:
+                self._exit_monitor.stop()
+                logger.info("[ExitMonitor] Stopped for liquidation")
+
+            # Slack 시작 알림
+            self._slack.send_message("⏰ [청산시작] 15:19 당일 청산 시작")
+
+            # 청산 실행
+            result = self._liquidation_manager.execute_liquidation()
+
+            # 결과 로깅
+            logger.info(f"Liquidation completed: {result.successful_orders}/{result.total_positions} positions closed")
+            logger.info(f"Total liquidation value: {result.total_liquidation_value:,}원")
+            logger.info(f"Total PnL: {result.total_pnl:+,}원")
+
+            # Slack 완료 알림
+            self._send_liquidation_summary(result)
+
+        except Exception as e:
+            logger.error(f"Daily liquidation failed: {e}", exc_info=True)
+            self._slack.notify_error("15:19 청산 실패", str(e))
+        finally:
+            # 청산 진행 플래그 해제
+            self._liquidation_in_progress = False
+
+    def _send_liquidation_summary(self, result: LiquidationResult) -> None:
+        """청산 결과 Slack 알림"""
+        duration = (result.completed_at - result.started_at).total_seconds()
+
+        if result.failed_orders == 0 and len(result.partial_fills) == 0:
+            # 완전 성공
+            message = (
+                f"✅ [청산완료] {result.successful_orders}/{result.total_positions} 성공\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+                f"💰 총 청산금액: {result.total_liquidation_value:,}원\n"
+                f"📈 실현손익: {result.total_pnl:+,}원 "
+                f"({result.total_pnl / result.total_liquidation_value * 100:+.2f}%)\n"
+                f"⏱️ 소요시간: {duration:.1f}초"
+            )
+        else:
+            # 부분 실패 또는 부분 체결
+            error_details = "\n".join([f"  - {code}: {msg}" for code, msg in result.errors])
+            partial_details = "\n".join(
+                [f"  - {code}: {qty}주 미체결" for code, qty in result.partial_fills.items()]
+            )
+
+            message = (
+                f"⚠️ [청산실패] {result.successful_orders}/{result.total_positions} 성공, "
+                f"{result.failed_orders} 실패\n"
+                f"━━━━━━━━━━━━━━━━━━━\n"
+            )
+
+            if error_details:
+                message += f"❌ 실패:\n{error_details}\n"
+
+            if partial_details:
+                message += f"⚠️ 부분 체결:\n{partial_details}\n"
+
+            message += f"\n⚠️ 수동 확인 필요!"
+
+        self._slack.send_message(message)
 
     def _on_idle(self) -> None:
         """장외 대기 콜백"""

@@ -101,6 +101,9 @@ class OrderManager:
         # 종목별 진행 중 주문 (중복 방지)
         self._pending_stocks: Set[str] = set()
 
+        # 청산 모드 플래그 (신규 매수 차단)
+        self._liquidation_mode = False
+
         # 콜백 (order, filled_qty, avg_price)
         self._on_fill_callback: Optional[Callable[["ManagedOrder", int, float], None]] = None
 
@@ -114,6 +117,16 @@ class OrderManager:
     ) -> None:
         """체결 콜백 설정 (order, filled_qty, avg_price)"""
         self._on_fill_callback = callback
+
+    def enable_liquidation_mode(self) -> None:
+        """청산 모드 활성화 (신규 매수 차단)"""
+        self._liquidation_mode = True
+        logger.warning("[OrderManager] Liquidation mode ENABLED - Buy orders blocked")
+
+    def disable_liquidation_mode(self) -> None:
+        """청산 모드 해제"""
+        self._liquidation_mode = False
+        logger.info("[OrderManager] Liquidation mode DISABLED - Buy orders re-enabled")
 
     def place_buy_order(
         self,
@@ -138,6 +151,11 @@ class OrderManager:
         Returns:
             주문 ID 또는 None (실패 시)
         """
+        # 청산 모드 체크 (신규 매수 차단)
+        if self._liquidation_mode:
+            logger.warning(f"[{stock_code}] 매수 주문 차단: 청산 진행 중")
+            return None
+
         # 중복 주문 체크
         if stock_code in self._pending_stocks:
             logger.warning(f"[{stock_code}] 매수 주문 차단: 중복 주문 (pending 상태의 주문 존재)")
@@ -298,6 +316,11 @@ class OrderManager:
             주문 ID 또는 None (실패 시)
         """
         import time
+
+        # 청산 모드 체크 (신규 매수 차단)
+        if self._liquidation_mode:
+            logger.warning(f"[{stock_code}] 매수 주문 차단: 청산 진행 중")
+            return None
 
         # 중복 주문 체크
         if stock_code in self._pending_stocks:
