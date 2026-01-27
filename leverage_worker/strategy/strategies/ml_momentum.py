@@ -177,6 +177,15 @@ class MLMomentumStrategy(BaseStrategy):
                 f"변동성: {vol_prob:.1%} | "
                 f"모멘텀: {mom5:+.0f}/{mom10:+.0f}"
             )
+        else:
+            # HOLD 시 디버그 로그 (시그널 미발생 원인 파악용)
+            logger.info(
+                f"[{stock_code}] HOLD | "
+                f"현재가: {context.current_price:,}({change_rate:+.2f}%) | "
+                f"변동성: {vol_prob:.1%} (임계: {self._vol_confidence:.0%}) | "
+                f"모멘텀: {mom5:+.0f}/{mom10:+.0f} | "
+                f"방향: {direction}"
+            )
 
         return TradingSignal.hold(stock_code, f"진입 조건 미충족 (vol_prob={vol_prob:.1%})")
 
