@@ -20,6 +20,7 @@ from leverage_worker.data.database import MarketDataDB
 from leverage_worker.data.minute_candle_repository import MinuteCandleRepository
 from leverage_worker.ml.data_utils import candles_to_dataframe
 from leverage_worker.ml.features import TradingFeatureEngineer
+from leverage_worker.ml.signal_generator import _ModuleRemappingUnpickler
 
 
 def check_signal_data(stock_code: str = "122630", target_date: str = "2026-01-27"):
@@ -96,7 +97,7 @@ def check_signal_data(stock_code: str = "122630", target_date: str = "2026-01-27
 
     if model_path.exists():
         with open(model_path, 'rb') as f:
-            save_data = pickle.load(f)
+            save_data = _ModuleRemappingUnpickler(f).load()
 
         model = save_data['model']
         feature_columns = save_data['feature_columns']
