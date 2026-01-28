@@ -1506,6 +1506,11 @@ class TradingEngine:
 
     def _send_liquidation_summary(self, result: LiquidationResult) -> None:
         """청산 결과 Slack 알림"""
+        # 포지션이 없었던 경우 별도 처리
+        if result.total_positions == 0:
+            self._slack.send_message("ℹ️ [청산완료] 청산할 포지션이 없습니다.")
+            return
+
         duration = (result.completed_at - result.started_at).total_seconds()
 
         if result.failed_orders == 0 and len(result.partial_fills) == 0:
