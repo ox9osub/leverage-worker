@@ -154,8 +154,7 @@ class MLMomentumStrategy(BaseStrategy):
 
         # 디버그: DataFrame 상태 확인
         import math
-        if mom5_raw is None or (isinstance(mom5_raw, float) and math.isnan(mom5_raw)):
-            logger.debug(f"[DEBUG] DataFrame 크기: {len(df)}, 컬럼: {'momentum_5' in df.columns}, iloc[-2] 시간: {last_row.get('timestamp', 'N/A')}")
+        logger.info(f"[DEBUG] df크기:{len(df)}, mom5:{mom5_raw}, mom10:{mom10_raw}")
 
         mom5 = 0 if mom5_raw is None or (isinstance(mom5_raw, float) and math.isnan(mom5_raw)) else mom5_raw
         mom10 = 0 if mom10_raw is None or (isinstance(mom10_raw, float) and math.isnan(mom10_raw)) else mom10_raw
