@@ -980,6 +980,8 @@ class OrderManager:
                 # 남은 체결분 처리 (콜백은 _handle_fill 내부에서 호출됨)
                 if order and order.filled_qty < filled_qty:
                     additional = filled_qty - order.filled_qty
+                    order.filled_qty = filled_qty  # 콜백 호출 전에 업데이트
+                    order.filled_price = limit_price  # 체결가도 업데이트
                     self._handle_fill(order, additional)
                 if order:
                     order.is_sell_fallback_in_progress = False

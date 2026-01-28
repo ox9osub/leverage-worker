@@ -51,6 +51,7 @@ class SlackNotifier:
         self._signal_count: Dict[Tuple[str, str], int] = {}  # (stock_code, strategy) -> 발생 횟수
         self._signal_first_sent: Set[Tuple[str, str]] = set()  # 첫 알림 전송된 pair
         self._signal_stock_names: Dict[str, str] = {}  # stock_code -> stock_name 매핑
+        self._sell_first_sent: Set[Tuple[str, str]] = set()  # 매도 알림 중복 방지
 
         # 우선순위: token+channel > webhook_url
         self._use_token = token is not None and channel is not None
@@ -190,6 +191,13 @@ class SlackNotifier:
         strategy_win_rate: Optional[float] = None,
     ) -> bool:
         """매도 주문 접수 알림"""
+        # 중복 방지: 동일 종목-전략 pair에 대해 첫 매도 알림만 전송
+        key = (stock_code, strategy_name)
+        if key in self._sell_first_sent:
+            logger.debug(f"Sell skipped (already sent): {stock_name} {strategy_name}")
+            return True
+        self._sell_first_sent.add(key)
+
         total_amount = quantity * price
         sign = "+" if profit_loss >= 0 else ""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -206,7 +214,7 @@ class SlackNotifier:
             strategy_display = f"{strategy_name}({strategy_win_rate:.1f}%)"
 
         lines = [
-            f"{self._get_mode_prefix()}[매도주문] {profit_icon} {sign}{profit_loss:,}원 ({sign}{profit_rate:.2f}%)",
+            f"{self._get_mode_prefix()}[매도 프로세스 완료] {profit_icon} {sign}{profit_loss:,}원 ({sign}{profit_rate:.2f}%)",
             f"{stock_name}({stock_code}) / {quantity}주 / {price:,}원 / {total_amount:,}원",
             f"손익: {sign}{profit_loss:,}원 ({sign}{profit_rate:.2f}%)",
             f"전략: {strategy_display}",
@@ -517,6 +525,7 @@ class SlackNotifier:
             self._signal_first_sent.discard(key)
         if key in self._signal_count:
             del self._signal_count[key]
+        self._sell_first_sent.discard(key)  # 매도 알림 중복 방지 초기화
         logger.debug(f"Signal history reset for {stock_code}/{strategy_name}")
 
     def send_signal_summary(self) -> bool:

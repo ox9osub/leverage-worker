@@ -81,8 +81,8 @@ def check_signal_data(stock_code: str = "122630", target_date: str = "2026-01-27
     print(f"{'시간':^12} {'종가':>10} {'momentum_5':>12} {'momentum_10':>12} {'시그널':^8}")
     print("-" * 80)
 
-    # 백테스트에서 시그널 발생 시점들
-    signal_times = ["10:02", "10:05", "10:46", "11:34", "11:37", "11:41", "12:00"]
+    # 백테스트에서 시그널 발생 시점들 (27일 기준)
+    signal_times = ["10:02", "10:05", "10:46", "11:34", "11:37", "11:41", "12:00", "12:04", "12:41", "13:10"]
 
     for idx, row in target_df.iterrows():
         time_str = row['timestamp'].strftime('%H:%M')
@@ -123,7 +123,7 @@ def check_signal_data(stock_code: str = "122630", target_date: str = "2026-01-27
         if missing_features:
             print(f"  - 누락된 피처: {missing_features[:5]}...")
         else:
-            print("  - 모든 피처 존재 ✓")
+            print("  - 모든 피처 존재 OK")
 
             # vol_prob 예측
             target_features = target_df[feature_columns].values
@@ -138,7 +138,7 @@ def check_signal_data(stock_code: str = "122630", target_date: str = "2026-01-27
                 time_str = row['timestamp'].strftime('%H:%M')
                 if time_str in signal_times:
                     vp = vol_probs[i]
-                    passed = "✓" if vp >= 0.85 else ""
+                    passed = "OK" if vp >= 0.85 else ""
                     print(f"  {time_str:^12} {vp:>10.1%} {0.85:>12.0%} {passed:^6}")
 
             print("-" * 60)
@@ -203,5 +203,5 @@ def compare_with_backtest(stock_code: str = "122630"):
 
 if __name__ == "__main__":
     # 메인 실행
-    check_signal_data("122630", "2026-01-28")
+    check_signal_data("122630", "2026-01-27")
     compare_with_backtest("122630")
