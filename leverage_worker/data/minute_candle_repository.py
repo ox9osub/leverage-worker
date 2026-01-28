@@ -211,8 +211,12 @@ class MinuteCandleRepository:
         """
         if before_minute_key:
             before_datetime = _minute_key_to_candle_datetime(before_minute_key)
-            return self.get_recent(stock_code, count, before_datetime=before_datetime)
-        return self.get_recent(stock_code, count)
+            return self.get_recent(stock_code, count, until_datetime=before_datetime, inclusive=False)
+
+        # 현재 시간까지의 데이터만 조회 (미래 데이터 제외)
+        from datetime import datetime
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        return self.get_recent(stock_code, count, until_datetime=now, inclusive=True)
 
     def get_today_prices(self, stock_code: str) -> List[MinuteCandle]:
         """
@@ -447,6 +451,8 @@ class MinuteCandleRepository:
         stock_code: str,
         count: int = 60,
         before_datetime: Optional[str] = None,
+        until_datetime: Optional[str] = None,
+        inclusive: bool = False,
     ) -> List[MinuteCandle]:
         """
         최근 N개 분봉 조회 (전략용)
@@ -454,19 +460,27 @@ class MinuteCandleRepository:
         Args:
             stock_code: 종목코드
             count: 조회 개수
-            before_datetime: 이 시간 이전 데이터만 (미포함)
+            before_datetime: (deprecated) 이 시간 이전 데이터만 (미포함)
+            until_datetime: 이 시간까지의 데이터만 조회
+            inclusive: True면 until_datetime 포함 (<=), False면 미포함 (<)
 
         Returns:
             MinuteCandle 리스트 (과거 → 최근 순)
         """
+        # before_datetime은 하위 호환성을 위해 유지
         if before_datetime:
-            query = """
+            until_datetime = before_datetime
+            inclusive = False
+
+        if until_datetime:
+            op = "<=" if inclusive else "<"
+            query = f"""
                 SELECT * FROM minute_candles
-                WHERE stock_code = ? AND candle_datetime < ?
+                WHERE stock_code = ? AND candle_datetime {op} ?
                 ORDER BY candle_datetime DESC
                 LIMIT ?
             """
-            params = (stock_code, before_datetime, count)
+            params = (stock_code, until_datetime, count)
         else:
             query = """
                 SELECT * FROM minute_candles
