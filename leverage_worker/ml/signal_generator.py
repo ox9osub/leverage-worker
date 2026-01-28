@@ -143,8 +143,8 @@ class VolatilityDirectionSignalGenerator:
             # 피처가 없으면 엔지니어링 수행
             df = self.feature_engineer.engineer_features(df)
 
-        # 전봉(완성된 봉)의 피처 사용 - 현재봉은 미완성 상태
-        features = df[self.feature_columns].iloc[-2:-1].values
+        # 마지막 행의 피처
+        features = df[self.feature_columns].iloc[-1:].values
 
         # 변동성 예측
         vol_prob = self.model.predict_proba(features)[:, 1][0]
@@ -153,8 +153,8 @@ class VolatilityDirectionSignalGenerator:
         if vol_prob < self.config.vol_confidence:
             return False, 'HOLD', vol_prob
 
-        # 방향 판단 - 전봉 기준
-        last_row = df.iloc[-2]
+        # 방향 판단
+        last_row = df.iloc[-1]
         direction = self._determine_direction(current_price, last_row)
 
         # LONG 신호만 반환 (SHORT은 인버스 ETF 필요)

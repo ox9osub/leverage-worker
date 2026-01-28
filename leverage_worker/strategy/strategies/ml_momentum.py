@@ -147,19 +147,10 @@ class MLMomentumStrategy(BaseStrategy):
             current_time=context.current_time,
         )
 
-        # 모멘텀 정보 추출 - 전봉 기준
-        last_row = df.iloc[-2]
-        mom5_raw = last_row.get('momentum_5')
-        mom10_raw = last_row.get('momentum_10')
-
-        # 디버그: DataFrame 상태 확인
-        import math
-        # 마지막 30행의 시간, close 확인
-        last30 = df[['timestamp', 'close']].tail(30).to_string()
-        logger.info(f"[DEBUG] df크기:{len(df)}\n{last30}")
-
-        mom5 = 0 if mom5_raw is None or (isinstance(mom5_raw, float) and math.isnan(mom5_raw)) else mom5_raw
-        mom10 = 0 if mom10_raw is None or (isinstance(mom10_raw, float) and math.isnan(mom10_raw)) else mom10_raw
+        # 모멘텀 정보 추출
+        last_row = df.iloc[-1]
+        mom5 = last_row.get('momentum_5', 0)
+        mom10 = last_row.get('momentum_10', 0)
 
         # 전일 종가 대비 등락률 계산
         prev_close = context.daily_candles[-1].close_price if context.daily_candles else context.current_price

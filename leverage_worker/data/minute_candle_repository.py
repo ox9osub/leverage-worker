@@ -213,10 +213,10 @@ class MinuteCandleRepository:
             before_datetime = _minute_key_to_candle_datetime(before_minute_key)
             return self.get_recent(stock_code, count, until_datetime=before_datetime, inclusive=False)
 
-        # 현재 시간까지의 데이터만 조회 (미래 데이터 제외)
+        # 현재 시간 이전 데이터만 조회 (현재 미완성 봉 + 미래 데이터 제외)
         from datetime import datetime
         now = datetime.now().strftime("%Y-%m-%d %H:%M")
-        return self.get_recent(stock_code, count, until_datetime=now, inclusive=True)
+        return self.get_recent(stock_code, count, until_datetime=now, inclusive=False)
 
     def get_today_prices(self, stock_code: str) -> List[MinuteCandle]:
         """
