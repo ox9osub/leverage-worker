@@ -164,7 +164,7 @@ class VolatilityDirectionSignalGenerator:
         # SHORT 신호는 무시 (로그만 남김)
         if direction == 'SHORT':
             logger.debug(f"SHORT 신호 무시 (인버스 ETF 필요): vol_prob={vol_prob:.2%}")
-            return False, 'HOLD', vol_prob
+            return False, 'SHORT', vol_prob
 
         return False, 'HOLD', vol_prob
 
