@@ -1099,8 +1099,11 @@ class TradingEngine:
 
                     # 포지션 보유 시 해당 전략으로만 매도 가능
                     # (unmanaged 포지션은 첫 번째 매칭 전략이 처리)
-                    if position and position.strategy_name is not None and position.strategy_name != strategy_name:
-                        continue
+                    is_other_strategy_position = (
+                        position
+                        and position.strategy_name is not None
+                        and position.strategy_name != strategy_name
+                    )
 
                     # 전략 컨텍스트 생성
                     context = StrategyContext(
@@ -1123,6 +1126,11 @@ class TradingEngine:
                             logger.warning(
                                 f"[{stock_code}] Cannot generate signal: {validation.errors}"
                             )
+                        continue
+
+                    # 다른 전략의 포지션이어도 모니터링 로그는 출력
+                    if is_other_strategy_position:
+                        strategy.generate_signal(context)
                         continue
 
                     # 시그널 생성
