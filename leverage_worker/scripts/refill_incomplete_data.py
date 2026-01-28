@@ -14,8 +14,9 @@
 
 import argparse
 import sys
+from pathlib import Path
 
-sys.path.insert(0, "c:/Users/suble/Desktop/work/project/kis-trader")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "kis-trader"))
 
 import time
 from datetime import datetime

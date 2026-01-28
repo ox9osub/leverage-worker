@@ -11,8 +11,9 @@ market_data.db에 122630, 233740 종목의 과거 데이터를 채웁니다.
 """
 
 import sys
+from pathlib import Path
 
-sys.path.insert(0, "c:/Users/suble/Desktop/work/project/kis-trader")
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "kis-trader"))
 
 import time
 from datetime import datetime, timedelta
