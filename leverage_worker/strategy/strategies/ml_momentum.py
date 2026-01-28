@@ -154,7 +154,9 @@ class MLMomentumStrategy(BaseStrategy):
 
         # 디버그: DataFrame 상태 확인
         import math
-        logger.info(f"[DEBUG] df크기:{len(df)}, mom5:{mom5_raw}, mom10:{mom10_raw}")
+        # 마지막 3행의 close와 momentum 확인
+        last3 = df[['close', 'momentum_5', 'momentum_10']].tail(3).to_dict('records')
+        logger.info(f"[DEBUG] df크기:{len(df)}, 마지막3행:{last3}")
 
         mom5 = 0 if mom5_raw is None or (isinstance(mom5_raw, float) and math.isnan(mom5_raw)) else mom5_raw
         mom10 = 0 if mom10_raw is None or (isinstance(mom10_raw, float) and math.isnan(mom10_raw)) else mom10_raw
