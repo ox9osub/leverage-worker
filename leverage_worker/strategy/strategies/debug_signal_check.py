@@ -60,16 +60,25 @@ def check_signal_data(stock_code: str = "122630", target_date: str = "2026-01-27
     df = engineer.engineer_features(df)
     print(f"  - 피처 포함 DataFrame 크기: {df.shape}")
 
-    # 4. 특정 날짜 데이터 필터링
-    print(f"\n[4] {target_date} 데이터 필터링")
+    # 4. 특정 날짜 데이터 필터링 (당일 포함 2일)
+    print(f"\n[4] {target_date} 포함 최근 2일 데이터 필터링")
     df['date'] = df['timestamp'].dt.date.astype(str)
-    target_df = df[df['date'] == target_date].copy()
-    print(f"  - {target_date} 분봉 개수: {len(target_df)}")
+    unique_dates = sorted(df['date'].unique())
+
+    if target_date in unique_dates:
+        target_idx = unique_dates.index(target_date)
+        filter_dates = unique_dates[max(0, target_idx - 1):target_idx + 1]
+    else:
+        filter_dates = [target_date]
+
+    target_df = df[df['date'].isin(filter_dates)].copy()
+    print(f"  - 필터링 날짜: {filter_dates}")
+    print(f"  - 필터링된 분봉 개수: {len(target_df)}")
 
     # 5. momentum_5, momentum_10 값 확인
     print("\n[5] 모멘텀 값 확인")
     print("-" * 80)
-    print(f"{'시간':^12} {'종가':>10} {'momentum_5':>12} {'momentum_10':>12} {'LONG조건':^8}")
+    print(f"{'시간':^12} {'종가':>10} {'momentum_5':>12} {'momentum_10':>12} {'시그널':^8}")
     print("-" * 80)
 
     # 백테스트에서 시그널 발생 시점들
@@ -81,13 +90,18 @@ def check_signal_data(stock_code: str = "122630", target_date: str = "2026-01-27
         mom10 = row.get('momentum_10', 0)
         close = row.get('close', 0)
 
-        # LONG 조건: mom5 > 0 and mom10 > 0
-        is_long = "✓" if (mom5 > 0 and mom10 > 0) else ""
+        # LONG/SHORT 조건 판단
+        if mom5 > 0 and mom10 > 0:
+            signal_type = "LONG"
+        elif mom5 < 0 and mom10 < 0:
+            signal_type = "SHORT"
+        else:
+            signal_type = ""
 
         # 시그널 시점만 출력
-        if time_str in signal_times or is_long == "✓":
+        if time_str in signal_times or signal_type:
             marker = "◀ 시그널" if time_str in signal_times else ""
-            print(f"{time_str:^12} {close:>10,.0f} {mom5:>+12.0f} {mom10:>+12.0f} {is_long:^8} {marker}")
+            print(f"{time_str:^12} {close:>10,.0f} {mom5:>+12.0f} {mom10:>+12.0f} {signal_type:^8} {marker}")
 
     print("-" * 80)
 
@@ -189,5 +203,5 @@ def compare_with_backtest(stock_code: str = "122630"):
 
 if __name__ == "__main__":
     # 메인 실행
-    check_signal_data("122630", "2026-01-27")
+    check_signal_data("122630", "2026-01-28")
     compare_with_backtest("122630")

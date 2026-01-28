@@ -1208,6 +1208,13 @@ class TradingEngine:
                 max_buy_amt = context.current_price * quantity  # fallback
                 logger.warning(f"[{stock_code}] 매수가능수량 조회 실패 → 시그널 수량 사용: {quantity}주")
 
+            # TP/SL 가격 계산
+            params = strategy.params if hasattr(strategy, 'params') else {}
+            tp_rate = params.get("take_profit_pct", 0.003)
+            sl_rate = params.get("stop_loss_pct", 0.01)
+            tp_price = int(context.current_price * (1 + tp_rate))
+            sl_price = int(context.current_price * (1 - sl_rate))
+
             # 시그널 알림 (주문 전)
             self._slack.notify_signal(
                 signal_type="BUY",
@@ -1218,6 +1225,10 @@ class TradingEngine:
                 strategy_name=strategy.name,
                 reason=signal.reason,
                 strategy_win_rate=win_rate,
+                tp_price=tp_price,
+                tp_rate=tp_rate,
+                sl_price=sl_price,
+                sl_rate=-sl_rate,  # 음수로 표시
             )
 
             # 지정가 추격 매수 (매도호가1로 주문 + 0.5초마다 정정)

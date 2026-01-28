@@ -225,6 +225,10 @@ class SlackNotifier:
         strategy_name: str,
         reason: str = "",
         strategy_win_rate: Optional[float] = None,
+        tp_price: Optional[int] = None,
+        tp_rate: Optional[float] = None,
+        sl_price: Optional[int] = None,
+        sl_rate: Optional[float] = None,
     ) -> bool:
         """시그널 발생 알림 (매수/매도 시그널)
 
@@ -261,8 +265,15 @@ class SlackNotifier:
         lines = [
             f"{self._get_mode_prefix()}[{signal_text}] {stock_name}({stock_code}) / {quantity}주 / {price:,}원 / {total_amount:,}원",
             f"전략: {strategy_display}" + (f" / {reason}" if reason else ""),
-            timestamp,
         ]
+
+        # 매수 시그널인 경우 TP/SL 정보 추가
+        if is_buy and tp_price is not None and sl_price is not None:
+            tp_rate_str = f"{tp_rate:.1%}" if tp_rate is not None else ""
+            sl_rate_str = f"{sl_rate:.1%}" if sl_rate is not None else ""
+            lines.append(f"TP: {tp_price:,}원({tp_rate_str}), SL: {sl_price:,}원({sl_rate_str})")
+
+        lines.append(timestamp)
 
         return self.send_message("\n".join(lines))
 

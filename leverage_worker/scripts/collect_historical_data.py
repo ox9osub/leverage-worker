@@ -32,11 +32,11 @@ EXPECTED_MINUTE_BARS = 381  # 09:00 ~ 15:30 = 390분, 실제 약 381개
 
 
 def get_trading_dates(days: int = 365) -> List[str]:
-    """과거 N일간의 날짜 리스트 (YYYYMMDD), 주말 제외"""
+    """과거 N일간의 날짜 리스트 (YYYYMMDD), 주말 제외, 오늘 포함"""
     dates = []
     today = datetime.now()
     for i in range(days):
-        date = today - timedelta(days=i + 1)
+        date = today - timedelta(days=i)  # 오늘부터 시작
         # 주말 제외 (월=0, 일=6)
         if date.weekday() < 5:
             dates.append(date.strftime("%Y%m%d"))
@@ -57,6 +57,16 @@ def collect_minute_data(
     여러 시간대에서 호출하여 전체 분봉을 수집합니다.
     """
     time_points = ["093000", "113000", "133000", "153000", "160000"]
+
+    # 오늘 날짜인 경우 현재 시간 이전의 time_points만 사용
+    now = datetime.now()
+    today_str = now.strftime("%Y%m%d")
+    if date_str == today_str:
+        current_time = now.strftime("%H%M%S")
+        time_points = [tp for tp in time_points if tp <= current_time]
+        if not time_points:
+            return 0  # 장 시작 전이면 수집하지 않음
+
     all_candles = []
 
     for tp in time_points:
