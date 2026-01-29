@@ -214,7 +214,7 @@ class SlackNotifier:
             strategy_display = f"{strategy_name}({strategy_win_rate:.1f}%)"
 
         lines = [
-            f"{self._get_mode_prefix()}[매도 프로세스 완료] {profit_icon} {sign}{profit_loss:,}원 ({sign}{profit_rate:.2f}%)",
+            f"{self._get_mode_prefix()}[매도주문] {profit_icon} {sign}{profit_loss:,}원 ({sign}{profit_rate:.2f}%)",
             f"{stock_name}({stock_code}) / {quantity}주 / {price:,}원 / {total_amount:,}원",
             f"손익: {sign}{profit_loss:,}원 ({sign}{profit_rate:.2f}%)",
             f"전략: {strategy_display}",
