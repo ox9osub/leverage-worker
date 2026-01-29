@@ -237,11 +237,13 @@ class SlackNotifier:
         tp_rate: Optional[float] = None,
         sl_price: Optional[int] = None,
         sl_rate: Optional[float] = None,
+        force: bool = False,
     ) -> bool:
         """시그널 발생 알림 (매수/매도 시그널)
 
         첫 번째 시그널만 즉시 전송, 이후 시그널은 카운트만 증가.
         send_signal_summary()로 요약 전송 가능.
+        force=True면 중복 체크 무시하고 항상 전송.
         """
         key = (stock_code, strategy_name)
 
@@ -249,8 +251,8 @@ class SlackNotifier:
         self._signal_count[key] = self._signal_count.get(key, 0) + 1
         self._signal_stock_names[stock_code] = stock_name
 
-        # 첫 시그널이 아니면 전송하지 않고 성공 반환
-        if key in self._signal_first_sent:
+        # 첫 시그널이 아니면 전송하지 않고 성공 반환 (force=True면 무시)
+        if key in self._signal_first_sent and not force:
             logger.debug(
                 f"Signal skipped (already sent): {stock_name} {strategy_name} "
                 f"(count: {self._signal_count[key]})"

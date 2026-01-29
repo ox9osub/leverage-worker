@@ -1223,7 +1223,7 @@ class TradingEngine:
             tp_price = int(context.current_price * (1 + tp_rate))
             sl_price = int(context.current_price * (1 - sl_rate))
 
-            # 시그널 알림 (주문 전)
+            # 시그널 알림 (주문 전) - 매수 시그널은 매번 전송
             self._slack.notify_signal(
                 signal_type="BUY",
                 stock_code=stock_code,
@@ -1237,6 +1237,7 @@ class TradingEngine:
                 tp_rate=tp_rate,
                 sl_price=sl_price,
                 sl_rate=-sl_rate,  # 음수로 표시
+                force=True,
             )
 
             # 지정가 추격 매수 (매도호가1로 주문 + 0.5초마다 정정)
