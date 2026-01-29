@@ -393,6 +393,8 @@ class OrderManager:
         # 4. 반복 정정 루프
         total_filled = 0
         current_price = ask_price
+        cumulative_pre_modify_cost = 0   # 정정 이전 체결분의 누적 비용
+        cumulative_pre_modify_fills = 0  # 정정 이전 체결분의 누적 수량
 
         for retry in range(max_retry):
             time.sleep(interval)  # 대기
@@ -456,7 +458,7 @@ class OrderManager:
             if new_ask_price > current_price:
                 # 남은 예수금 = 초기 예수금 - (체결수량 * 체결가격들의 합)
                 # 간소화: 체결수량 * 현재 기준가격으로 계산
-                used_amount = total_filled * current_price
+                used_amount = cumulative_pre_modify_cost + (total_filled * current_price)
                 remaining_deposit = deposit - used_amount
 
                 # 새 가격으로 주문 가능한 수량
@@ -574,6 +576,11 @@ class OrderManager:
                     self._active_orders[new_order_id] = order
                     logger.info(f"[{stock_code}] 주문번호 변경: {order_id} -> {new_order_id}")
                     order_id = new_order_id  # 이후 루프에서 새 ID 사용
+
+                # 정정 이전 체결 비용/수량 누적 (새 주문은 체결 0에서 시작)
+                cumulative_pre_modify_cost += order.filled_qty * current_price
+                cumulative_pre_modify_fills += order.filled_qty
+                order.filled_qty = 0  # 새 주문은 체결 이력 0에서 시작
 
                 # ManagedOrder 상태 업데이트
                 order.quantity = new_order_qty
@@ -693,6 +700,9 @@ class OrderManager:
                 order.is_chase_in_progress = False
                 self._pending_stocks.discard(stock_code)
                 self._update_order_in_db(order)
+
+        # 누적 체결 수량 반영 (외부 참조용: Slack 알림 등)
+        order.filled_qty += cumulative_pre_modify_fills
 
         return order_id
 
@@ -1296,6 +1306,10 @@ class OrderManager:
     def get_active_orders(self) -> List[ManagedOrder]:
         """활성 주문 조회"""
         return list(self._active_orders.values())
+
+    def get_order(self, order_id: str) -> Optional[ManagedOrder]:
+        """주문 ID로 관리 주문 조회"""
+        return self._active_orders.get(order_id)
 
     def has_pending_order(self, stock_code: str) -> bool:
         """종목에 진행 중인 주문이 있는지 확인"""

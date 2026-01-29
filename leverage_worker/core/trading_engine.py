@@ -1254,11 +1254,15 @@ class TradingEngine:
 
             if order_id:
                 logger.info(f"[{stock_code}] 지정가 추격 매수 프로세스 종료: {order_id}")
+                order = self._order_manager.get_order(order_id)
+                actual_qty = order.filled_qty if order else quantity
+                actual_price = order.filled_price if order and order.filled_price > 0 else context.current_price
+
                 self._slack.notify_buy(
                     stock_code=stock_code,
                     stock_name=stock_name,
-                    quantity=quantity,
-                    price=context.current_price,
+                    quantity=actual_qty,
+                    price=actual_price,
                     strategy_name=strategy.name,
                     reason=signal.reason,
                     strategy_win_rate=win_rate,
