@@ -1220,8 +1220,18 @@ class TradingEngine:
             params = strategy.params if hasattr(strategy, 'params') else {}
             tp_rate = params.get("take_profit_pct", 0.003)
             sl_rate = params.get("stop_loss_pct", 0.01)
-            tp_price = int(context.current_price * (1 + tp_rate))
-            sl_price = int(context.current_price * (1 - sl_rate))
+            price_offset_pct = params.get("price_offset_pct", 0.0)
+
+            # 오프셋 적용된 시그널 가격 (TP/SL 기준가)
+            signal_price = int(context.current_price * (1 + price_offset_pct))
+            tp_price = int(signal_price * (1 + tp_rate))
+            sl_price = int(signal_price * (1 - sl_rate))
+
+            if price_offset_pct != 0.0:
+                logger.info(
+                    f"[{stock_code}] price_offset: {price_offset_pct:+.4f} "
+                    f"현재가 {context.current_price:,} → 시그널가 {signal_price:,}"
+                )
 
             # 시그널 알림 (주문 전) - 매수 시그널은 매번 전송
             self._slack.notify_signal(
@@ -1250,7 +1260,7 @@ class TradingEngine:
                 strategy_name=strategy.name,
                 interval=0.5,
                 max_retry=10,
-                signal_price=context.current_price,
+                signal_price=signal_price,
             )
 
             if order_id:

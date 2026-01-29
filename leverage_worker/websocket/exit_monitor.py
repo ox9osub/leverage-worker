@@ -406,16 +406,16 @@ class ExitMonitor:
         Returns:
             (reason, is_take_profit) 또는 None
         """
-        # TP는 시그널 가격 기준, SL은 실제 매수가 기준
-        tp_base_price = config.signal_price if config.signal_price > 0 else config.avg_price
-        tp_profit_rate = (current_price - tp_base_price) / tp_base_price
-        sl_profit_rate = (current_price - config.avg_price) / config.avg_price
+        # TP/SL 모두 시그널 가격 기준 (price_offset_pct 반영)
+        base_price = config.signal_price if config.signal_price > 0 else config.avg_price
+        tp_profit_rate = (current_price - base_price) / base_price
+        sl_profit_rate = (current_price - base_price) / base_price
 
-        # 손절 (우선 확인) - 실제 매수가 기준
+        # 손절 (우선 확인)
         if sl_profit_rate <= -config.stop_loss_pct:
             return (f"손절: {sl_profit_rate:.2%}", False)
 
-        # 익절 - 시그널 가격 기준
+        # 익절
         if tp_profit_rate >= config.take_profit_pct:
             return (f"익절: {tp_profit_rate:.2%}", True)
 
