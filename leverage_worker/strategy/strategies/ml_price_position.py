@@ -24,7 +24,9 @@ ML 가격 위치 전략 (ml_price_position)
     - Profit Factor: 2.02
 """
 
+import csv
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from leverage_worker.ml import (
@@ -168,9 +170,36 @@ class MLPricePositionStrategy(BaseStrategy):
         daily_range = daily_high - daily_low
         position_pct = (context.current_price - daily_low) / daily_range if daily_range > 0 else 0
 
+        # CSV 기록 및 포지션 상태
+        pos_str = "보유" if context.has_position else ""
+        signal_label = "LONG" if (should_signal and direction == "LONG") else "HOLD"
+
+        csv_dir = Path(__file__).resolve().parent.parent.parent / "data" / "signals"
+        csv_dir.mkdir(parents=True, exist_ok=True)
+        csv_path = csv_dir / f"{context.current_time.strftime('%Y%m%d')}-{self.name}.csv"
+
+        write_header = not csv_path.exists()
+        with open(csv_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            if write_header:
+                writer.writerow(["시간", "현재가", "등락률", "포지션", "시그널", "방향", "vol_prob", "고가", "저가", "가격위치"])
+            writer.writerow([
+                context.current_time.strftime("%H:%M:%S"),
+                context.current_price,
+                f"{change_rate:+.2f}",
+                pos_str,
+                signal_label,
+                direction,
+                f"{vol_prob:.4f}",
+                daily_high,
+                daily_low,
+                f"{position_pct:.4f}",
+            ])
+
         if should_signal and direction == 'LONG':
             logger.info(
                 f"[{stock_code}] LONG 시그널 | "
+                f"포지션: {pos_str or '없음'} | "
                 f"현재가: {context.current_price:,}({change_rate:+.2f}%) | "
                 f"변동성: {vol_prob:.1%} | "
                 f"고/저: {daily_high:,}/{daily_low:,} | "
@@ -186,6 +215,7 @@ class MLPricePositionStrategy(BaseStrategy):
         if direction == 'SHORT':
             logger.info(
                 f"[{stock_code}] SHORT 시그널 (미지원) | "
+                f"포지션: {pos_str or '없음'} | "
                 f"현재가: {context.current_price:,}({change_rate:+.2f}%) | "
                 f"변동성: {vol_prob:.1%} | "
                 f"고/저: {daily_high:,}/{daily_low:,} | "
@@ -195,6 +225,7 @@ class MLPricePositionStrategy(BaseStrategy):
             # HOLD 시 디버그 로그 (시그널 미발생 원인 파악용)
             logger.info(
                 f"[{stock_code}] HOLD | "
+                f"포지션: {pos_str or '없음'} | "
                 f"현재가: {context.current_price:,}({change_rate:+.2f}%) | "
                 f"변동성: {vol_prob:.4%} (임계: {self._vol_confidence:.0%}) | "
                 f"고/저: {daily_high:,}/{daily_low:,} | "
