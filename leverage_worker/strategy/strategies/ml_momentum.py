@@ -182,12 +182,12 @@ class MLMomentumStrategy(BaseStrategy):
             logger.info(
                 f"[{stock_code}] HOLD | "
                 f"현재가: {context.current_price:,}({change_rate:+.2f}%) | "
-                f"변동성: {vol_prob:.1%} (임계: {self._vol_confidence:.0%}) | "
+                f"변동성: {vol_prob:.4%} (임계: {self._vol_confidence:.0%}) | "
                 f"모멘텀: {mom5:+.0f}/{mom10:+.0f} | "
                 f"방향: {direction}"
             )
 
-        return TradingSignal.hold(stock_code, f"진입 조건 미충족 (vol_prob={vol_prob:.1%})")
+        return TradingSignal.hold(stock_code, f"진입 조건 미충족 (vol_prob={vol_prob:.4%})")
 
     def _check_exit_condition(self, context: StrategyContext) -> TradingSignal:
         """
