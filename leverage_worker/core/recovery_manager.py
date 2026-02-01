@@ -67,6 +67,7 @@ class RecoveryManager:
         self._session_id: Optional[str] = None
         self._thread: Optional[threading.Thread] = None
         self._running = False
+        self._lock = threading.Lock()
 
         logger.info(f"RecoveryManager initialized: {state_dir}")
         structured_logger.module_init("RecoveryManager", state_dir=str(state_dir))
@@ -214,29 +215,33 @@ class RecoveryManager:
     ) -> None:
         """세션 상태 저장"""
         try:
-            # 기존 상태 읽기
-            existing = {}
-            if self._state_file.exists():
-                with open(self._state_file, encoding="utf-8") as f:
-                    content = f.read().strip()
-                    if content:
-                        existing = json.loads(content)
+            with self._lock:
+                # 기존 상태 읽기
+                existing = {}
+                if self._state_file.exists():
+                    with open(self._state_file, encoding="utf-8") as f:
+                        content = f.read().strip()
+                        if content:
+                            existing = json.loads(content)
 
-            now = datetime.now().isoformat()
+                now = datetime.now().isoformat()
 
-            state = {
-                "session_id": self._session_id,
-                "pid": os.getpid(),
-                "status": status,
-                "started_at": existing.get("started_at", now),
-                "last_heartbeat": now,
-                "active_orders": active_orders if active_orders is not None else existing.get("active_orders", []),
-                "positions": positions if positions is not None else existing.get("positions", []),
-                "metadata": existing.get("metadata", {}),
-            }
+                state = {
+                    "session_id": self._session_id,
+                    "pid": os.getpid(),
+                    "status": status,
+                    "started_at": existing.get("started_at", now),
+                    "last_heartbeat": now,
+                    "active_orders": active_orders if active_orders is not None else existing.get("active_orders", []),
+                    "positions": positions if positions is not None else existing.get("positions", []),
+                    "metadata": existing.get("metadata", {}),
+                }
 
-            with open(self._state_file, "w", encoding="utf-8") as f:
-                json.dump(state, f, ensure_ascii=False, indent=2)
+                # atomic write: 임시 파일에 쓴 후 교체
+                tmp_file = self._state_file.with_suffix(".tmp")
+                with open(tmp_file, "w", encoding="utf-8") as f:
+                    json.dump(state, f, ensure_ascii=False, indent=2)
+                tmp_file.replace(self._state_file)
 
         except Exception as e:
             logger.error(f"Failed to save session state: {e}")
