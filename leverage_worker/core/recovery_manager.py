@@ -241,11 +241,8 @@ class RecoveryManager:
                     "metadata": existing.get("metadata", {}),
                 }
 
-                # atomic write: 임시 파일에 쓴 후 교체
-                tmp_file = self._state_file.with_suffix(".tmp")
-                with open(tmp_file, "w", encoding="utf-8") as f:
+                with open(self._state_file, "w", encoding="utf-8") as f:
                     json.dump(state, f, ensure_ascii=False, indent=2)
-                tmp_file.replace(self._state_file)
 
         except Exception as e:
             logger.error(f"Failed to save session state: {e}")
