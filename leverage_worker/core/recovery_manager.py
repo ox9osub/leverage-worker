@@ -219,10 +219,14 @@ class RecoveryManager:
                 # 기존 상태 읽기
                 existing = {}
                 if self._state_file.exists():
-                    with open(self._state_file, encoding="utf-8") as f:
-                        content = f.read().strip()
-                        if content:
-                            existing = json.loads(content)
+                    try:
+                        with open(self._state_file, encoding="utf-8") as f:
+                            content = f.read().strip()
+                            if content:
+                                existing = json.loads(content)
+                    except json.JSONDecodeError:
+                        logger.warning("Corrupted session state file, resetting")
+                        existing = {}
 
                 now = datetime.now().isoformat()
 
