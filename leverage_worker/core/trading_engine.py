@@ -44,6 +44,8 @@ from leverage_worker.utils.logger import get_logger, attach_slack_handler
 from leverage_worker.utils.log_constants import LogEventType
 from leverage_worker.utils.math_utils import calculate_allocation_amount
 from leverage_worker.utils.structured_logger import get_structured_logger
+from leverage_worker.scalping.executor import ScalpingExecutor
+from leverage_worker.scalping.models import ScalpingConfig
 from leverage_worker.websocket import ExitMonitor, ExitMonitorConfig, RealtimeWSClient, TickData
 
 logger = get_logger(__name__)
@@ -135,6 +137,9 @@ class TradingEngine:
 
         # 15. 실시간 매도 모니터링 (realtime_exit: true 전략용)
         self._exit_monitor: Optional[ExitMonitor] = None
+
+        # 15-1. 스캘핑 실행기: (stock_code, strategy_name) -> ScalpingExecutor
+        self._scalping_executors: Dict[tuple, ScalpingExecutor] = {}
 
         # 16. 동시성 제어 (스케줄러/WebSocket 공유 리소스 보호)
         self._tick_lock = threading.Lock()
@@ -346,6 +351,16 @@ class TradingEngine:
                 self._exit_monitor.stop()
                 logger.info("Exit monitor stopped")
 
+            # 3-3. 스캘핑 executor 중지
+            for _key, executor in self._scalping_executors.items():
+                if executor.is_active:
+                    executor.deactivate()
+            if self._scalping_executors:
+                logger.info(
+                    f"Scalping executors deactivated: "
+                    f"{len(self._scalping_executors)}"
+                )
+
             # 4. 미체결 주문 취소
             if self._order_manager:
                 cancelled = self._order_manager.cancel_all_pending()
@@ -538,6 +553,21 @@ class TradingEngine:
                     self._strategies[key] = strategy
                     logger.debug(f"Strategy loaded: {stock_code} -> {name}")
 
+                    # 스캘핑 전략의 경우 ScalpingExecutor 생성
+                    if strategy_config.get("execution_mode") == "scalping":
+                        scalping_config = ScalpingConfig.from_params(params)
+                        executor = ScalpingExecutor(
+                            stock_code=stock_code,
+                            stock_name=stock_config.name,
+                            config=scalping_config,
+                            broker=self._broker,
+                            strategy_name=name,
+                        )
+                        self._scalping_executors[key] = executor
+                        logger.info(
+                            f"ScalpingExecutor created: {stock_code} -> {name}"
+                        )
+
                     # ML 전략의 경우 모델 로드 미리 시도
                     if hasattr(strategy, "_ensure_model_loaded"):
                         if not strategy._ensure_model_loaded():
@@ -683,12 +713,12 @@ class TradingEngine:
         logger.info(f"WebSocket started for {len(ws_stock_codes)} stocks: {ws_stock_codes}")
 
     def _get_ws_strategy_stocks(self) -> Set[str]:
-        """WebSocket 전략이 설정된 종목 목록 조회"""
+        """WebSocket 전략이 설정된 종목 목록 조회 (websocket + scalping 모두 포함)"""
         ws_stocks = set()
         for stock_code, stock_config in self._settings.stocks.items():
             for strategy_config in stock_config.strategies:
-                # execution_mode가 "websocket"인 전략 찾기
-                if strategy_config.get("execution_mode") == "websocket":
+                mode = strategy_config.get("execution_mode")
+                if mode in ("websocket", "scalping"):
                     ws_stocks.add(stock_code)
                     break
         return ws_stocks
@@ -1004,6 +1034,11 @@ class TradingEngine:
                     # 시그널 처리
                     self._process_signal(signal, context, strategy)
 
+                # 스캘핑 executor에 tick 전달 (별도 처리, 중복 주문 방지와 무관)
+                for key, executor in self._scalping_executors.items():
+                    if key[0] == stock_code and executor.is_active:
+                        executor.on_tick(tick_data.price, now)
+
             except Exception as e:
                 logger.error(f"WebSocket tick error [{tick_data.stock_code}]: {e}")
 
@@ -1095,6 +1130,37 @@ class TradingEngine:
                     strategy = self._strategies.get(key)
 
                     if not strategy:
+                        continue
+
+                    # 스캘핑 전략: executor에 라우팅 (별도 처리)
+                    if strategy_config.get("execution_mode") == "scalping":
+                        executor = self._scalping_executors.get(key)
+                        if executor:
+                            context = StrategyContext(
+                                stock_code=stock_code,
+                                stock_name=stock_config.name,
+                                current_price=current_price,
+                                current_time=now,
+                                price_history=price_history,
+                                position=broker_position,
+                                daily_candles=daily_candles,
+                                today_trade_count=self._order_manager.get_today_trade_count(
+                                    stock_code
+                                ),
+                            )
+                            if strategy.can_generate_signal(context):
+                                signal = strategy.generate_signal(context)
+                                if signal.is_buy and not executor.is_active:
+                                    executor.activate_signal(
+                                        signal_price=current_price,
+                                        tp_pct=executor._config.take_profit_pct,
+                                        sl_pct=executor._config.stop_loss_pct,
+                                        timeout_minutes=executor._config.max_signal_minutes,
+                                    )
+                                    self._slack.send_message(
+                                        f"[{stock_config.name}] 스캘핑 시그널 활성화: "
+                                        f"가격={current_price:,}원, {signal.reason}"
+                                    )
                         continue
 
                     # 포지션 보유 시 해당 전략으로만 매도 가능
@@ -1497,6 +1563,13 @@ class TradingEngine:
             if self._exit_monitor:
                 self._exit_monitor.stop()
                 logger.info("[ExitMonitor] Stopped for liquidation")
+
+            # 스캘핑 executor 정지 (중복 매도 방지)
+            for _key, executor in self._scalping_executors.items():
+                if executor.is_active:
+                    executor.deactivate()
+            if self._scalping_executors:
+                logger.info("[ScalpingExecutor] Deactivated for liquidation")
 
             # Slack 시작 알림
             self._slack.send_message("⏰ [청산시작] 15:19 당일 청산 시작")

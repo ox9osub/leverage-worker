@@ -51,6 +51,9 @@ from leverage_worker.strategy.strategies.kosdaq_mdd_target import KosdaqMDDTarge
 # WebSocket 실시간 전략
 from leverage_worker.strategy.strategies.dip_buy import DipBuyStrategy
 
+# 스캘핑 전략
+from leverage_worker.strategy.strategies.scalping_range import ScalpingRangeStrategy
+
 
 __all__ = [
     # 기본 예시 전략
@@ -71,4 +74,6 @@ __all__ = [
     "KosdaqMDDTargetStrategy",
     # WebSocket 실시간 전략
     "DipBuyStrategy",
+    # 스캘핑 전략
+    "ScalpingRangeStrategy",
 ]

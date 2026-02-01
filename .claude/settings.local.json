@@ -30,7 +30,8 @@
       "Bash(.conda/python leverage_worker/strategy/strategies/debug_signal_check.py -d 2026-01-28)",
       "Bash(\".conda/python.exe\":*)",
       "Bash(c:/Users/suble/.conda/envs/leverage-worker/python.exe:*)",
-      "Bash(/c/Users/suble/.conda/envs/leverage-worker/python.exe:*)"
+      "Bash(/c/Users/suble/.conda/envs/leverage-worker/python.exe:*)",
+      "Bash(wc:*)"
     ],
     "deny": [],
     "ask": []
