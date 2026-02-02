@@ -556,12 +556,14 @@ class TradingEngine:
                     # 스캘핑 전략의 경우 ScalpingExecutor 생성
                     if strategy_config.get("execution_mode") == "scalping":
                         scalping_config = ScalpingConfig.from_params(params)
+                        allocation = float(strategy_config.get("allocation", 100))
                         executor = ScalpingExecutor(
                             stock_code=stock_code,
                             stock_name=stock_config.name,
                             config=scalping_config,
                             broker=self._broker,
                             strategy_name=name,
+                            allocation=allocation,
                         )
                         self._scalping_executors[key] = executor
                         logger.info(
@@ -595,15 +597,42 @@ class TradingEngine:
             logger.info("📊 Account Balance")
             logger.info("=" * 50)
 
-            # 계좌 요약
-            if summary:
-                deposit = summary.get("deposit", 0)
-                total_eval = summary.get("total_eval", 0)
-                total_pl = summary.get("total_profit_loss", 0)
+            # balance 조회 실패 시 (summary가 비어있으면 API 에러)
+            if not summary:
+                logger.warning(
+                    f"Account verification failed (first attempt) - "
+                    f"CANO: '{self._settings.account_number}', "
+                    f"ACNT_PRDT_CD: '{self._settings.account_product_code}', "
+                    f"Mode: {self._settings.mode.value}"
+                )
+                logger.warning("Attempting token refresh and retry...")
 
-                logger.info(f"  Deposit:      {deposit:>15,} KRW")
-                logger.info(f"  Total Eval:   {total_eval:>15,} KRW")
-                logger.info(f"  Total P/L:    {total_pl:>+15,} KRW")
+                # 토큰 재발급 후 재시도 (1회)
+                if self._session.force_reauthenticate():
+                    positions, summary = self._broker.get_balance()
+
+                if not summary:
+                    logger.error(
+                        f"Account verification failed after token refresh - "
+                        f"CANO: '{self._settings.account_number}', "
+                        f"ACNT_PRDT_CD: '{self._settings.account_product_code}', "
+                        f"Mode: {self._settings.mode.value}"
+                    )
+                    logger.error("=" * 50)
+                    raise RuntimeError(
+                        "Account verification failed (INVALID_CHECK_ACNO). "
+                        "Check account_number in credentials YAML. "
+                        "For paper trading, ensure the account is registered for 모의투자."
+                    )
+
+            # 계좌 요약
+            deposit = summary.get("deposit", 0)
+            total_eval = summary.get("total_eval", 0)
+            total_pl = summary.get("total_profit_loss", 0)
+
+            logger.info(f"  Deposit:      {deposit:>15,} KRW")
+            logger.info(f"  Total Eval:   {total_eval:>15,} KRW")
+            logger.info(f"  Total P/L:    {total_pl:>+15,} KRW")
 
             # 보유 종목
             if positions:
@@ -622,6 +651,8 @@ class TradingEngine:
             logger.info("=" * 50)
             logger.info("✅ API connection verified")
 
+        except RuntimeError:
+            raise
         except Exception as e:
             logger.error(f"Failed to fetch balance: {e}")
             raise RuntimeError(f"API connection failed: {e}")

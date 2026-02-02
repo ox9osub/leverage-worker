@@ -83,30 +83,30 @@ class TradingFeatureEngineer:
             return df
 
         # 기본 시간 피처
-        df['hour'] = df['timestamp'].dt.hour
-        df['minute'] = df['timestamp'].dt.minute
-        df['day_of_week'] = df['timestamp'].dt.dayofweek
+        df.loc[:, 'hour'] = df['timestamp'].dt.hour
+        df.loc[:, 'minute'] = df['timestamp'].dt.minute
+        df.loc[:, 'day_of_week'] = df['timestamp'].dt.dayofweek
 
         # 장 시작 이후 분
-        df['minutes_since_open'] = (df['hour'] - 9) * 60 + df['minute']
+        df.loc[:, 'minutes_since_open'] = (df['hour'] - 9) * 60 + df['minute']
 
         # 시간대 카테고리
-        df['is_opening_30min'] = ((df['hour'] == 9) & (df['minute'] < 30)).astype(int)
-        df['is_closing_30min'] = (df['hour'] >= 15).astype(int)
-        df['is_morning'] = ((df['hour'] >= 9) & (df['hour'] < 12)).astype(int)
-        df['is_afternoon'] = ((df['hour'] >= 12) & (df['hour'] < 15)).astype(int)
+        df.loc[:, 'is_opening_30min'] = ((df['hour'] == 9) & (df['minute'] < 30)).astype(int)
+        df.loc[:, 'is_closing_30min'] = (df['hour'] >= 15).astype(int)
+        df.loc[:, 'is_morning'] = ((df['hour'] >= 9) & (df['hour'] < 12)).astype(int)
+        df.loc[:, 'is_afternoon'] = ((df['hour'] >= 12) & (df['hour'] < 15)).astype(int)
 
         # 세션 진행률 (0~1)
         # 9:00 = 0, 15:30 = 1
         total_minutes = 6.5 * 60  # 6시간 30분
-        df['session_progress'] = df['minutes_since_open'] / total_minutes
-        df['session_progress'] = df['session_progress'].clip(0, 1)
+        df.loc[:, 'session_progress'] = df['minutes_since_open'] / total_minutes
+        df.loc[:, 'session_progress'] = df['session_progress'].clip(0, 1)
 
         # 순환 인코딩 (시간의 주기성 반영)
-        df['hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
-        df['hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
-        df['minute_sin'] = np.sin(2 * np.pi * df['minute'] / 60)
-        df['minute_cos'] = np.cos(2 * np.pi * df['minute'] / 60)
+        df.loc[:, 'hour_sin'] = np.sin(2 * np.pi * df['hour'] / 24)
+        df.loc[:, 'hour_cos'] = np.cos(2 * np.pi * df['hour'] / 24)
+        df.loc[:, 'minute_sin'] = np.sin(2 * np.pi * df['minute'] / 60)
+        df.loc[:, 'minute_cos'] = np.cos(2 * np.pi * df['minute'] / 60)
 
         return df
 
@@ -115,28 +115,28 @@ class TradingFeatureEngineer:
         df = df.copy()
 
         # 가격 변화
-        df['price_change'] = df['close'].diff()
-        df['price_change_pct'] = df['close'].pct_change()
+        df.loc[:, 'price_change'] = df['close'].diff()
+        df.loc[:, 'price_change_pct'] = df['close'].pct_change()
 
         # 가격 범위
-        df['price_range'] = df['high'] - df['low']
-        df['price_range_pct'] = df['price_range'] / df['close']
+        df.loc[:, 'price_range'] = df['high'] - df['low']
+        df.loc[:, 'price_range_pct'] = df['price_range'] / df['close']
 
         # 이동평균
         for window in self.config.ma_windows:
-            df[f'price_ma_{window}'] = df['close'].rolling(window=window, min_periods=1).mean()
-            df[f'price_std_{window}'] = df['close'].rolling(window=window, min_periods=1).std()
+            df.loc[:, f'price_ma_{window}'] = df['close'].rolling(window=window, min_periods=1).mean()
+            df.loc[:, f'price_std_{window}'] = df['close'].rolling(window=window, min_periods=1).std()
 
         # 이동평균 대비 위치
         for window in self.config.ma_windows:
-            df[f'price_vs_ma_{window}'] = (df['close'] - df[f'price_ma_{window}']) / df[f'price_ma_{window}']
-            df[f'price_above_ma_{window}'] = (df['close'] > df[f'price_ma_{window}']).astype(int)
+            df.loc[:, f'price_vs_ma_{window}'] = (df['close'] - df[f'price_ma_{window}']) / df[f'price_ma_{window}']
+            df.loc[:, f'price_above_ma_{window}'] = (df['close'] > df[f'price_ma_{window}']).astype(int)
 
         # 당일 시가 대비
         if 'timestamp' in df.columns:
-            df['date'] = df['timestamp'].dt.date
-            df['day_open'] = df.groupby('date')['open'].transform('first')
-            df['price_vs_day_open'] = (df['close'] - df['day_open']) / df['day_open']
+            df.loc[:, 'date'] = df['timestamp'].dt.date
+            df.loc[:, 'day_open'] = df.groupby('date')['open'].transform('first')
+            df.loc[:, 'price_vs_day_open'] = (df['close'] - df['day_open']) / df['day_open']
 
         return df
 
@@ -146,28 +146,28 @@ class TradingFeatureEngineer:
 
         # 거래량 이동평균
         for window in self.config.ma_windows:
-            df[f'volume_ma_{window}'] = df['volume'].rolling(window=window, min_periods=1).mean()
-            df[f'volume_std_{window}'] = df['volume'].rolling(window=window, min_periods=1).std()
+            df.loc[:, f'volume_ma_{window}'] = df['volume'].rolling(window=window, min_periods=1).mean()
+            df.loc[:, f'volume_std_{window}'] = df['volume'].rolling(window=window, min_periods=1).std()
 
         # 거래량 비율
         for window in self.config.ma_windows:
-            df[f'volume_ratio_{window}'] = df['volume'] / (df[f'volume_ma_{window}'] + 1e-10)
-            df[f'volume_zscore_{window}'] = (
+            df.loc[:, f'volume_ratio_{window}'] = df['volume'] / (df[f'volume_ma_{window}'] + 1e-10)
+            df.loc[:, f'volume_zscore_{window}'] = (
                 (df['volume'] - df[f'volume_ma_{window}']) /
                 (df[f'volume_std_{window}'] + 1e-10)
             )
 
         # 거래량 변화
-        df['volume_change'] = df['volume'].diff()
-        df['volume_change_pct'] = df['volume'].pct_change()
+        df.loc[:, 'volume_change'] = df['volume'].diff()
+        df.loc[:, 'volume_change_pct'] = df['volume'].pct_change()
 
         # 거래량 급증 플래그
-        df['volume_surge'] = (df['volume_ratio_20'] > 2.0).astype(int)
-        df['volume_dry'] = (df['volume_ratio_20'] < 0.5).astype(int)
+        df.loc[:, 'volume_surge'] = (df['volume_ratio_20'] > 2.0).astype(int)
+        df.loc[:, 'volume_dry'] = (df['volume_ratio_20'] < 0.5).astype(int)
 
         # 누적 거래량 (당일)
         if 'date' in df.columns:
-            df['cumulative_volume'] = df.groupby('date')['volume'].cumsum()
+            df.loc[:, 'cumulative_volume'] = df.groupby('date')['volume'].cumsum()
 
         return df
 
@@ -177,24 +177,24 @@ class TradingFeatureEngineer:
 
         # RSI
         for period in self.config.rsi_periods:
-            df[f'rsi_{period}'] = self._calculate_rsi(df['close'], period)
+            df.loc[:, f'rsi_{period}'] = self._calculate_rsi(df['close'], period)
 
         # MACD
-        df['ema_12'] = df['close'].ewm(span=12, adjust=False).mean()
-        df['ema_26'] = df['close'].ewm(span=26, adjust=False).mean()
-        df['macd'] = df['ema_12'] - df['ema_26']
-        df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-        df['macd_hist'] = df['macd'] - df['macd_signal']
+        df.loc[:, 'ema_12'] = df['close'].ewm(span=12, adjust=False).mean()
+        df.loc[:, 'ema_26'] = df['close'].ewm(span=26, adjust=False).mean()
+        df.loc[:, 'macd'] = df['ema_12'] - df['ema_26']
+        df.loc[:, 'macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
+        df.loc[:, 'macd_hist'] = df['macd'] - df['macd_signal']
 
         # 볼린저 밴드
         for window in [20]:
             ma = df['close'].rolling(window=window, min_periods=1).mean()
             std = df['close'].rolling(window=window, min_periods=1).std()
-            df[f'bb_upper_{window}'] = ma + 2 * std
-            df[f'bb_lower_{window}'] = ma - 2 * std
-            df[f'bb_width_{window}'] = (df[f'bb_upper_{window}'] - df[f'bb_lower_{window}']) / ma
+            df.loc[:, f'bb_upper_{window}'] = ma + 2 * std
+            df.loc[:, f'bb_lower_{window}'] = ma - 2 * std
+            df.loc[:, f'bb_width_{window}'] = (df[f'bb_upper_{window}'] - df[f'bb_lower_{window}']) / ma
             # 볼린저 밴드 내 위치 (0~1)
-            df[f'bb_position_{window}'] = (
+            df.loc[:, f'bb_position_{window}'] = (
                 (df['close'] - df[f'bb_lower_{window}']) /
                 (df[f'bb_upper_{window}'] - df[f'bb_lower_{window}'] + 1e-10)
             )
@@ -203,37 +203,37 @@ class TradingFeatureEngineer:
         for period in [14]:
             low_min = df['low'].rolling(window=period, min_periods=1).min()
             high_max = df['high'].rolling(window=period, min_periods=1).max()
-            df[f'stoch_k_{period}'] = (
+            df.loc[:, f'stoch_k_{period}'] = (
                 (df['close'] - low_min) / (high_max - low_min + 1e-10) * 100
             )
-            df[f'stoch_d_{period}'] = df[f'stoch_k_{period}'].rolling(window=3, min_periods=1).mean()
+            df.loc[:, f'stoch_d_{period}'] = df[f'stoch_k_{period}'].rolling(window=3, min_periods=1).mean()
 
         # ATR (Average True Range)
-        df['tr'] = np.maximum(
+        df.loc[:, 'tr'] = np.maximum(
             df['high'] - df['low'],
             np.maximum(
                 abs(df['high'] - df['close'].shift(1)),
                 abs(df['low'] - df['close'].shift(1))
             )
         )
-        df['atr_14'] = df['tr'].rolling(window=14, min_periods=1).mean()
-        df['atr_pct'] = df['atr_14'] / df['close']
+        df.loc[:, 'atr_14'] = df['tr'].rolling(window=14, min_periods=1).mean()
+        df.loc[:, 'atr_pct'] = df['atr_14'] / df['close']
 
         # ADX (Average Directional Index) - 간소화 버전
-        df['dm_plus'] = np.where(
+        df.loc[:, 'dm_plus'] = np.where(
             (df['high'] - df['high'].shift(1)) > (df['low'].shift(1) - df['low']),
             np.maximum(df['high'] - df['high'].shift(1), 0),
             0
         )
-        df['dm_minus'] = np.where(
+        df.loc[:, 'dm_minus'] = np.where(
             (df['low'].shift(1) - df['low']) > (df['high'] - df['high'].shift(1)),
             np.maximum(df['low'].shift(1) - df['low'], 0),
             0
         )
-        df['di_plus_14'] = (df['dm_plus'].rolling(14).mean() / df['atr_14']) * 100
-        df['di_minus_14'] = (df['dm_minus'].rolling(14).mean() / df['atr_14']) * 100
-        df['dx'] = abs(df['di_plus_14'] - df['di_minus_14']) / (df['di_plus_14'] + df['di_minus_14'] + 1e-10) * 100
-        df['adx_14'] = df['dx'].rolling(14).mean()
+        df.loc[:, 'di_plus_14'] = (df['dm_plus'].rolling(14).mean() / df['atr_14']) * 100
+        df.loc[:, 'di_minus_14'] = (df['dm_minus'].rolling(14).mean() / df['atr_14']) * 100
+        df.loc[:, 'dx'] = abs(df['di_plus_14'] - df['di_minus_14']) / (df['di_plus_14'] + df['di_minus_14'] + 1e-10) * 100
+        df.loc[:, 'adx_14'] = df['dx'].rolling(14).mean()
 
         return df
 
@@ -253,29 +253,29 @@ class TradingFeatureEngineer:
         body = df['close'] - df['open']
         full_range = df['high'] - df['low'] + 1e-10
 
-        df['candle_body'] = body
-        df['candle_body_pct'] = abs(body) / full_range
-        df['candle_upper_shadow'] = df['high'] - np.maximum(df['close'], df['open'])
-        df['candle_lower_shadow'] = np.minimum(df['close'], df['open']) - df['low']
-        df['candle_upper_shadow_pct'] = df['candle_upper_shadow'] / full_range
-        df['candle_lower_shadow_pct'] = df['candle_lower_shadow'] / full_range
+        df.loc[:, 'candle_body'] = body
+        df.loc[:, 'candle_body_pct'] = abs(body) / full_range
+        df.loc[:, 'candle_upper_shadow'] = df['high'] - np.maximum(df['close'], df['open'])
+        df.loc[:, 'candle_lower_shadow'] = np.minimum(df['close'], df['open']) - df['low']
+        df.loc[:, 'candle_upper_shadow_pct'] = df['candle_upper_shadow'] / full_range
+        df.loc[:, 'candle_lower_shadow_pct'] = df['candle_lower_shadow'] / full_range
 
         # 캔들 방향
-        df['is_bullish'] = (df['close'] > df['open']).astype(int)
-        df['is_bearish'] = (df['close'] < df['open']).astype(int)
-        df['is_doji'] = (df['candle_body_pct'] < 0.1).astype(int)
+        df.loc[:, 'is_bullish'] = (df['close'] > df['open']).astype(int)
+        df.loc[:, 'is_bearish'] = (df['close'] < df['open']).astype(int)
+        df.loc[:, 'is_doji'] = (df['candle_body_pct'] < 0.1).astype(int)
 
         # 연속 상승/하락 봉 수
-        df['consecutive_up'] = self._count_consecutive(df['is_bullish'])
-        df['consecutive_down'] = self._count_consecutive(df['is_bearish'])
+        df.loc[:, 'consecutive_up'] = self._count_consecutive(df['is_bullish'])
+        df.loc[:, 'consecutive_down'] = self._count_consecutive(df['is_bearish'])
 
         # 최근 고점/저점 대비 거리
         for window in [5, 10, 20]:
-            df[f'dist_from_high_{window}'] = (
+            df.loc[:, f'dist_from_high_{window}'] = (
                 (df['high'].rolling(window=window, min_periods=1).max() - df['close']) /
                 df['close']
             )
-            df[f'dist_from_low_{window}'] = (
+            df.loc[:, f'dist_from_low_{window}'] = (
                 (df['close'] - df['low'].rolling(window=window, min_periods=1).min()) /
                 df['close']
             )
@@ -284,7 +284,7 @@ class TradingFeatureEngineer:
         for window in [20, 60]:
             high_max = df['high'].rolling(window=window, min_periods=1).max()
             low_min = df['low'].rolling(window=window, min_periods=1).min()
-            df[f'price_position_{window}'] = (
+            df.loc[:, f'price_position_{window}'] = (
                 (df['close'] - low_min) / (high_max - low_min + 1e-10)
             )
 
@@ -309,22 +309,22 @@ class TradingFeatureEngineer:
 
         # 과거 N분 수익률
         for period in [1, 3, 5, 10, 15, 20, 30]:
-            df[f'return_{period}'] = df['close'].pct_change(period)
+            df.loc[:, f'return_{period}'] = df['close'].pct_change(period)
 
         # 변동성 (수익률 표준편차)
         for window in [5, 10, 20]:
-            df[f'volatility_{window}'] = df['return_1'].rolling(window=window, min_periods=1).std()
+            df.loc[:, f'volatility_{window}'] = df['return_1'].rolling(window=window, min_periods=1).std()
 
         # 수익률 Z-score
         for window in [20]:
             mean_ret = df['return_1'].rolling(window=window, min_periods=1).mean()
             std_ret = df['return_1'].rolling(window=window, min_periods=1).std()
-            df[f'return_zscore_{window}'] = (df['return_1'] - mean_ret) / (std_ret + 1e-10)
+            df.loc[:, f'return_zscore_{window}'] = (df['return_1'] - mean_ret) / (std_ret + 1e-10)
 
         # 모멘텀
-        df['momentum_5'] = df['close'] - df['close'].shift(5)
-        df['momentum_10'] = df['close'] - df['close'].shift(10)
-        df['momentum_20'] = df['close'] - df['close'].shift(20)
+        df.loc[:, 'momentum_5'] = df['close'] - df['close'].shift(5)
+        df.loc[:, 'momentum_10'] = df['close'] - df['close'].shift(10)
+        df.loc[:, 'momentum_20'] = df['close'] - df['close'].shift(20)
 
         return df
 

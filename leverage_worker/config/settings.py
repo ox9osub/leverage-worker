@@ -288,6 +288,17 @@ class Settings:
 
         if not self.account_number:
             result.add_error("account_number is missing")
+        elif not self.account_number.isdigit() or len(self.account_number) != 8:
+            result.add_error(
+                f"account_number '{self.account_number}' is invalid "
+                f"(expected 8-digit number, got {len(self.account_number)} chars)"
+            )
+
+        if not self.account_product_code.isdigit() or len(self.account_product_code) != 2:
+            result.add_error(
+                f"account_product_code '{self.account_product_code}' is invalid "
+                f"(expected 2-digit number like '01')"
+            )
 
         # 2. 종목 설정 검증
         if not self._stocks:

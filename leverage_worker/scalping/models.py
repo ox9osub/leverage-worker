@@ -2,10 +2,10 @@
 스캘핑 전략 데이터 모델
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 
 class ScalpingState(Enum):

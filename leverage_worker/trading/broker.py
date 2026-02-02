@@ -96,6 +96,15 @@ class OrderInfo:
     order_time: str
 
 
+# KIS API 인증/계좌 관련 에러 코드 (토큰 재발급으로 복구 가능)
+_AUTH_ERROR_CODES = frozenset({
+    "OPSQ2000",   # INPUT INVALID_CHECK_ACNO (계좌 검증 실패)
+    "OPSQ0013",   # 유효하지 않은 토큰
+    "EGW00123",   # 기간이 만료된 token
+    "EGW00121",   # 유효하지 않은 token
+})
+
+
 class KISBroker:
     """
     한국투자증권 API 브로커
@@ -111,6 +120,11 @@ class KISBroker:
         self._session = session
         self._account_no, self._account_prod = session.get_account_info()
         logger.info(f"KISBroker initialized. Account: {self._account_no}")
+
+    @staticmethod
+    def _is_auth_error(res: APIResp) -> bool:
+        """인증/계좌 관련 에러 여부 확인"""
+        return res.get_error_code() in _AUTH_ERROR_CODES
 
     def get_current_price(self, stock_code: str) -> Optional[StockPrice]:
         """
@@ -274,8 +288,30 @@ class KISBroker:
         summary = {}
 
         if not res.is_ok():
-            res.print_error(api_url)
-            return positions, summary
+            logger.error(
+                f"get_balance failed - CANO: '{self._account_no}', "
+                f"ACNT_PRDT_CD: '{self._account_prod}', "
+                f"Error: {res.get_error_code()} {res.get_error_message()}"
+            )
+
+            # 인증/계좌 에러 시 토큰 재발급 후 1회 재시도
+            if self._is_auth_error(res):
+                logger.warning("Auth/account error detected. Attempting token refresh and retry...")
+                if self._session.force_reauthenticate():
+                    res = self._session.url_fetch(api_url, tr_id, params=params)
+                    self._session.smart_sleep()
+                    if not res.is_ok():
+                        logger.error(
+                            f"get_balance still failed after token refresh: "
+                            f"{res.get_error_code()} {res.get_error_message()}"
+                        )
+                        return positions, summary
+                    logger.info("get_balance succeeded after token refresh")
+                else:
+                    logger.error("Token re-authentication failed")
+                    return positions, summary
+            else:
+                return positions, summary
 
         try:
             body = res.get_body()
@@ -628,17 +664,26 @@ class KISBroker:
         """
         return self._get_orders(filled_only=False)
 
-    def get_order_status(self, order_id: str) -> Tuple[int, int]:
+    def get_order_status(
+        self,
+        order_id: str,
+        stock_code: str = "",
+        order_qty: int = 0,
+        side: Optional[OrderSide] = None,
+    ) -> Tuple[int, int]:
         """
         주문의 체결/미체결 수량 조회
 
         Args:
             order_id: 주문번호
+            stock_code: 종목코드 (fallback용)
+            order_qty: 주문수량 (fallback용)
+            side: 매수/매도 구분 (fallback용)
 
         Returns:
             (체결수량, 미체결수량) 튜플
         """
-        # 전체 주문 조회 (체결 + 미체결)
+        # 1차: _get_orders로 정확한 체결 조회
         orders = self._get_orders(all_orders=True)
 
         for order in orders:
@@ -646,9 +691,66 @@ class KISBroker:
                 unfilled_qty = order.order_qty - order.filled_qty
                 return (order.filled_qty, unfilled_qty)
 
+        # orders가 비어있으면 API 실패 → balance fallback
+        if not orders and stock_code and side:
+            logger.info(
+                f"_get_orders failed, using balance fallback for order {order_id}"
+            )
+            return self._get_order_status_from_balance(stock_code, order_qty, side)
+
         # 주문을 찾지 못한 경우 (전량 체결 등)
         logger.warning(f"Order not found: {order_id}")
         return (0, 0)
+
+    def _get_order_status_from_balance(
+        self,
+        stock_code: str,
+        order_qty: int,
+        side: OrderSide,
+    ) -> Tuple[int, int]:
+        """
+        잔고 조회 기반 체결 상태 추론 (inquire-daily-ccld 실패 시 fallback)
+
+        Args:
+            stock_code: 종목코드
+            order_qty: 주문수량
+            side: 매수/매도 구분
+
+        Returns:
+            (체결수량, 미체결수량) 튜플
+        """
+        positions, _ = self.get_balance()
+        held_qty = 0
+        for pos in positions:
+            if pos.stock_code == stock_code:
+                held_qty = pos.quantity
+                break
+
+        if side == OrderSide.BUY:
+            # 잔고에 있으면 체결된 것으로 판단
+            if held_qty > 0:
+                filled = min(held_qty, order_qty)
+                unfilled = max(0, order_qty - held_qty)
+                logger.info(
+                    f"[balance fallback] BUY: held={held_qty}, "
+                    f"filled={filled}, unfilled={unfilled}"
+                )
+                return (filled, unfilled)
+            return (0, order_qty)
+        else:  # SELL
+            # 잔고에 없으면 매도 체결된 것으로 판단
+            if held_qty == 0:
+                logger.info(
+                    f"[balance fallback] SELL: no position → fully filled"
+                )
+                return (order_qty, 0)
+            sold = max(0, order_qty - held_qty)
+            remaining = order_qty - sold
+            logger.info(
+                f"[balance fallback] SELL: held={held_qty}, "
+                f"sold={sold}, remaining={remaining}"
+            )
+            return (sold, remaining)
 
     def get_today_orders(self) -> List[OrderInfo]:
         """
@@ -710,6 +812,7 @@ class KISBroker:
         orders = []
 
         if not res.is_ok():
+            logger.error(f"_get_orders failed - CANO: '{self._account_no}', ACNT_PRDT_CD: '{self._account_prod}'")
             res.print_error(api_url)
             return orders
 

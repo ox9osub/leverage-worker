@@ -8,6 +8,7 @@ KIS Open API 인증 및 토큰 관리
 """
 
 import copy
+import hashlib
 import json
 import threading
 import time
@@ -157,6 +158,10 @@ class SessionManager:
         mode_suffix = "paper" if self._is_paper else "prod"
         return self._token_dir / f"KIS_{mode_suffix}_{datetime.now().strftime('%Y%m%d')}"
 
+    def _get_credential_fingerprint(self) -> str:
+        """app_key의 SHA-256 해시 앞 16자 (토큰-자격증명 바인딩용)"""
+        return hashlib.sha256(self._settings.app_key.encode()).hexdigest()[:16]
+
     def _save_token(self, token: str, expired: str) -> None:
         """토큰 저장"""
         valid_date = datetime.strptime(expired, "%Y-%m-%d %H:%M:%S")
@@ -165,6 +170,7 @@ class SessionManager:
         with open(token_path, "w", encoding="utf-8") as f:
             f.write(f"token: {token}\n")
             f.write(f"valid-date: {valid_date}\n")
+            f.write(f"app_key_hash: {self._get_credential_fingerprint()}\n")
 
         logger.debug(f"Token saved to {token_path}")
 
@@ -184,9 +190,21 @@ class SessionManager:
 
             valid_date: datetime = data["valid-date"]
 
-            if valid_date > datetime.now():
-                return (data["token"], valid_date)
-            return None
+            if valid_date <= datetime.now():
+                return None
+
+            # 자격증명 바인딩 검증 (app_key 해시 비교)
+            stored_hash = data.get("app_key_hash")
+            if stored_hash is not None:
+                current_hash = self._get_credential_fingerprint()
+                if stored_hash != current_hash:
+                    logger.warning(
+                        "Cached token credential mismatch detected "
+                        "(app_key changed). Requesting new token."
+                    )
+                    return None
+
+            return (data["token"], valid_date)
 
         except Exception as e:
             logger.warning(f"Failed to read token: {e}")
@@ -228,6 +246,31 @@ class SessionManager:
             logger.info(f"Authentication completed. Mode: {self._settings.mode.value}")
 
             return True
+
+    def invalidate_token(self) -> None:
+        """캐시된 토큰 무효화 (파일 삭제 + 내부 상태 초기화)"""
+        token_path = self._get_token_file_path()
+        if token_path.exists():
+            try:
+                token_path.unlink()
+                logger.info(f"Cached token invalidated: {token_path}")
+            except OSError as e:
+                logger.warning(f"Failed to delete token file: {e}")
+
+        self._token = None
+        self._token_expires_at = None
+        self._token_valid = False
+
+    def force_reauthenticate(self) -> bool:
+        """토큰 강제 재발급 (기존 토큰 무효화 후 신규 발급)"""
+        # 최근 60초 이내 인증된 경우 재발급 건너뛰기 (KIS API 1분 제한)
+        if self._last_auth_time and (datetime.now() - self._last_auth_time).total_seconds() < 60:
+            logger.info("Skipping re-authentication (last auth within 60 seconds)")
+            return self._token_valid
+
+        logger.info("Force re-authentication requested")
+        self.invalidate_token()
+        return self.authenticate()
 
     def set_token_refresh_failed_callback(self, callback: callable) -> None:
         """토큰 갱신 실패 시 호출할 콜백 설정 (예: Slack 알림)"""

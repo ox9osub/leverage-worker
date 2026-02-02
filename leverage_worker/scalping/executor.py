@@ -5,7 +5,6 @@ WebSocket tick 기반으로 P10 매수 → +0.1% 매도를 반복 실행
 """
 
 import threading
-import time as time_module
 from datetime import datetime
 from typing import Optional
 
@@ -64,12 +63,14 @@ class ScalpingExecutor:
         config: ScalpingConfig,
         broker: KISBroker,
         strategy_name: str = "scalping_range",
+        allocation: float = 100.0,
     ) -> None:
         self._stock_code = stock_code
         self._stock_name = stock_name
         self._config = config
         self._broker = broker
         self._strategy_name = strategy_name
+        self._allocation = allocation
 
         # 상태
         self._state = ScalpingState.IDLE
@@ -220,8 +221,32 @@ class ScalpingExecutor:
         if buy_price > self._signal_ctx.signal_price:
             return
 
-        # 매수 수량 결정
-        quantity = self._config.position_size
+        # 매수 수량 결정 (예수금 기반 allocation 적용)
+        try:
+            buyable_qty, _ = self._broker.get_buyable_quantity(
+                self._stock_code, buy_price
+            )
+            if buyable_qty > 0:
+                quantity = int(buyable_qty * (self._allocation / 100))
+                if quantity < 1:
+                    quantity = 1
+                logger.info(
+                    f"[scalping][{self._stock_name}] 수량 계산: "
+                    f"매수가능={buyable_qty}주, allocation={self._allocation}%, "
+                    f"주문수량={quantity}주"
+                )
+            else:
+                quantity = self._config.position_size
+                logger.warning(
+                    f"[scalping][{self._stock_name}] 매수가능 수량 0 → "
+                    f"fallback position_size={quantity}"
+                )
+        except Exception as e:
+            quantity = self._config.position_size
+            logger.warning(
+                f"[scalping][{self._stock_name}] 수량 계산 실패({e}) → "
+                f"fallback position_size={quantity}"
+            )
 
         # 매수 주문
         result = self._broker.place_limit_order(
@@ -254,7 +279,12 @@ class ScalpingExecutor:
             return
 
         # 체결 상태 조회
-        filled_qty, unfilled_qty = self._broker.get_order_status(self._buy_order_id)
+        filled_qty, unfilled_qty = self._broker.get_order_status(
+            self._buy_order_id,
+            stock_code=self._stock_code,
+            order_qty=self._buy_order_qty,
+            side=OrderSide.BUY,
+        )
 
         if filled_qty > 0:
             # 체결된 수량 반영
@@ -294,7 +324,12 @@ class ScalpingExecutor:
         """
         # 매수 주문이 남아있으면 추가 체결 확인
         if self._buy_order_id:
-            filled_qty, unfilled_qty = self._broker.get_order_status(self._buy_order_id)
+            filled_qty, unfilled_qty = self._broker.get_order_status(
+                self._buy_order_id,
+                stock_code=self._stock_code,
+                order_qty=self._buy_order_qty,
+                side=OrderSide.BUY,
+            )
             if filled_qty > self._held_qty:
                 new_fills = filled_qty - self._held_qty
                 self._update_position(filled_qty, self._buy_order_price)
@@ -320,7 +355,12 @@ class ScalpingExecutor:
             if self._buy_order_id:
                 self._cancel_buy_order()
                 # 취소 후 최종 체결량 재확인
-                final_filled, _ = self._broker.get_order_status(self._buy_order_id)
+                final_filled, _ = self._broker.get_order_status(
+                    self._buy_order_id,
+                    stock_code=self._stock_code,
+                    order_qty=self._buy_order_qty,
+                    side=OrderSide.BUY,
+                )
                 if final_filled > self._held_qty:
                     self._update_position(final_filled, self._buy_order_price)
                 self._clear_buy_order()
@@ -339,7 +379,12 @@ class ScalpingExecutor:
             return
 
         # 체결 확인
-        filled_qty, unfilled_qty = self._broker.get_order_status(self._sell_order_id)
+        filled_qty, unfilled_qty = self._broker.get_order_status(
+            self._sell_order_id,
+            stock_code=self._stock_code,
+            order_qty=self._sell_order_qty,
+            side=OrderSide.SELL,
+        )
 
         if unfilled_qty == 0 and filled_qty > 0:
             # 전량 매도 체결
@@ -530,7 +575,12 @@ class ScalpingExecutor:
 
         # 취소 후 최종 체결 상태 확인
         if self._buy_order_id:
-            filled_qty, _ = self._broker.get_order_status(self._buy_order_id)
+            filled_qty, _ = self._broker.get_order_status(
+                self._buy_order_id,
+                stock_code=self._stock_code,
+                order_qty=self._buy_order_qty,
+                side=OrderSide.BUY,
+            )
             if filled_qty > 0:
                 self._update_position(filled_qty, self._buy_order_price)
                 self._clear_buy_order()
@@ -546,7 +596,12 @@ class ScalpingExecutor:
         if self._buy_order_id:
             self._cancel_buy_order()
             # 취소 중 체결 확인
-            filled_qty, _ = self._broker.get_order_status(self._buy_order_id)
+            filled_qty, _ = self._broker.get_order_status(
+                self._buy_order_id,
+                stock_code=self._stock_code,
+                order_qty=self._buy_order_qty,
+                side=OrderSide.BUY,
+            )
             if filled_qty > self._held_qty:
                 self._update_position(filled_qty, self._buy_order_price)
             self._clear_buy_order()
@@ -554,7 +609,12 @@ class ScalpingExecutor:
         if self._sell_order_id:
             self._cancel_sell_order()
             # 취소 중 체결 확인
-            filled_qty, _ = self._broker.get_order_status(self._sell_order_id)
+            filled_qty, _ = self._broker.get_order_status(
+                self._sell_order_id,
+                stock_code=self._stock_code,
+                order_qty=self._sell_order_qty,
+                side=OrderSide.SELL,
+            )
             if filled_qty > 0:
                 pnl = int((self._sell_order_price - self._held_avg_price) * filled_qty)
                 remaining = self._held_qty - filled_qty
