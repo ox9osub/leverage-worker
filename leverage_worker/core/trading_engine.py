@@ -568,6 +568,7 @@ class TradingEngine:
                             broker=self._broker,
                             strategy_name=name,
                             allocation=allocation,
+                            ws_client=self._ws_client,
                         )
                         self._scalping_executors[key] = executor
                         logger.info(
@@ -841,17 +842,43 @@ class TradingEngine:
         self._slack.notify_error("WebSocket 에러", str(error))
 
     def _on_ws_order_notice(self, notice: OrderNoticeData) -> None:
-        """WebSocket 체결통보 수신 콜백 - OrderManager.process_ws_fill() 직접 호출"""
+        """WebSocket 체결통보 수신 콜백 - OrderManager + Scalping Executor 라우팅"""
         try:
             logger.info(
                 f"[WS 체결통보] {notice.stock_code} "
                 f"주문번호={notice.order_no} 체결수량={notice.filled_qty}"
             )
-            self._order_manager.process_ws_fill(
+
+            # 1. Try OrderManager first (regular orders)
+            order = self._order_manager.process_ws_fill(
                 order_no=notice.order_no,
                 filled_qty=notice.filled_qty,
                 filled_price=notice.filled_price,
             )
+
+            if order:
+                return  # Handled by OrderManager
+
+            # 2. Route to ScalpingExecutor
+            for key, executor in self._scalping_executors.items():
+                if executor.is_active:
+                    handled = executor.process_ws_fill(
+                        notice.order_no,
+                        notice.filled_qty,
+                        notice.filled_price,
+                    )
+                    if handled:
+                        logger.info(
+                            f"[WS 체결] ScalpingExecutor handled: "
+                            f"{key[0]} {key[1]}"
+                        )
+                        return
+
+            # 3. Order not found (cancelled/outdated)
+            logger.debug(
+                f"[WS 체결] Order {notice.order_no} not found in active orders"
+            )
+
         except Exception as e:
             logger.error(f"Order notice handling error: {e}")
 

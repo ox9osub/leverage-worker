@@ -6,7 +6,10 @@ WebSocket tick 기반으로 P10 매수 → +0.1% 매도를 반복 실행
 
 import threading
 from datetime import datetime
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
+
+if TYPE_CHECKING:
+    from leverage_worker.websocket.ws_client import RealtimeWSClient
 
 from leverage_worker.scalping.models import ScalpingConfig, ScalpingSignalContext, ScalpingState
 from leverage_worker.scalping.price_tracker import PriceRangeTracker
@@ -59,6 +62,7 @@ class ScalpingExecutor:
         broker: KISBroker,
         strategy_name: str = "scalping_range",
         allocation: float = 100.0,
+        ws_client: Optional["RealtimeWSClient"] = None,
     ) -> None:
         self._stock_code = stock_code
         self._stock_name = stock_name
@@ -66,6 +70,7 @@ class ScalpingExecutor:
         self._broker = broker
         self._strategy_name = strategy_name
         self._allocation = allocation
+        self._ws_client = ws_client
 
         # 상태
         self._state = ScalpingState.IDLE
@@ -184,6 +189,102 @@ class ScalpingExecutor:
             if handler:
                 handler(price, timestamp)
 
+    def process_ws_fill(
+        self, order_no: str, filled_qty: int, filled_price: int
+    ) -> bool:
+        """
+        WebSocket 체결통보 처리 (TradingEngine에서 라우팅)
+
+        Args:
+            order_no: 주문번호
+            filled_qty: 체결 수량
+            filled_price: 체결 단가
+
+        Returns:
+            True if this executor handled the order, False otherwise
+        """
+        with self._lock:
+            # Check if this is our order
+            if order_no != self._buy_order_id and order_no != self._sell_order_id:
+                return False
+
+            if order_no == self._buy_order_id:
+                return self._handle_ws_buy_fill(filled_qty, filled_price)
+            elif order_no == self._sell_order_id:
+                return self._handle_ws_sell_fill(filled_qty, filled_price)
+
+        return False
+
+    def _handle_ws_buy_fill(self, filled_qty: int, filled_price: int) -> bool:
+        """매수 체결 WS 처리 (증분)"""
+        # EC-2: 중복 알림 방지 - remaining_qty 초과 불가
+        remaining_qty = self._buy_order_qty - self._held_qty
+        actual_fill = min(filled_qty, remaining_qty)
+
+        if actual_fill <= 0:
+            logger.debug(
+                f"[WS] 중복 체결 알림 무시: order={self._buy_order_id}, "
+                f"filled_qty={filled_qty}, already_held={self._held_qty}"
+            )
+            return True  # Handled (not an error)
+
+        # Update position (cumulative)
+        self._update_position(self._held_qty + actual_fill, filled_price)
+
+        # Check if fully filled
+        if self._held_qty >= self._buy_order_qty:
+            # Full fill → immediate sell
+            self._clear_buy_order()
+            self._place_sell_order()
+            logger.info(
+                f"[WS] 전량 매수 체결 (+{actual_fill}주) → 즉시 매도: "
+                f"{self._held_qty}주 @ {self._held_avg_price:,.0f}원"
+            )
+            return True
+
+        # Partial fill → POSITION_HELD
+        if self._state == ScalpingState.BUY_PENDING:
+            self._transition(ScalpingState.POSITION_HELD)
+            logger.info(
+                f"[WS] 부분 매수 체결 (+{actual_fill}주): "
+                f"{self._held_qty}/{self._buy_order_qty}주 @ {self._held_avg_price:,.0f}원"
+            )
+        else:
+            # POSITION_HELD에서 추가 체결
+            logger.info(
+                f"[WS] 추가 매수 체결 (+{actual_fill}주): "
+                f"{self._held_qty}/{self._buy_order_qty}주 @ {self._held_avg_price:,.0f}원"
+            )
+
+        return True
+
+    def _handle_ws_sell_fill(self, filled_qty: int, filled_price: int) -> bool:
+        """매도 체결 WS 처리 (증분)"""
+        # EC-2: 중복 알림 방지 - 이미 COOLDOWN이면 무시
+        if self._state == ScalpingState.COOLDOWN:
+            logger.debug(f"[WS] 중복 매도 체결 알림 무시 (already in COOLDOWN)")
+            return True
+
+        if filled_qty >= self._sell_order_qty:
+            # Full sell fill
+            pnl = int((filled_price - self._held_avg_price) * filled_qty)
+            self._record_cycle_complete(pnl)
+            self._clear_sell_order()
+            self._clear_position()
+            self._cooldown_start = datetime.now()
+            self._transition(ScalpingState.COOLDOWN)
+            logger.info(
+                f"[WS] 전량 매도 체결: {filled_qty}주 @ {filled_price:,}원, "
+                f"손익: {pnl:,}원"
+            )
+            return True
+
+        # Partial sell (keep waiting)
+        logger.debug(
+            f"[WS] 부분 매도: {filled_qty}/{self._sell_order_qty}주 @ {filled_price:,}원"
+        )
+        return True
+
     def deactivate(self) -> None:
         """강제 종료 (일간 청산, 긴급 정지 등)"""
         with self._lock:
@@ -284,28 +385,34 @@ class ScalpingExecutor:
             )
 
     def _handle_buy_pending(self, price: int, timestamp: datetime) -> None:
-        """BUY_PENDING: 체결 확인 및 타임아웃 처리"""
+        """BUY_PENDING: REST 폴백 + 타임아웃 처리 (WS가 우선)"""
         if not self._buy_order_id:
             self._transition(ScalpingState.MONITORING)
             return
 
-        # 체결 확인 스로틀링 (N초마다 한 번만 API 호출)
+        # 타임아웃 확인 (매 틱)
+        if self._buy_order_time:
+            elapsed = (timestamp - self._buy_order_time).total_seconds()
+            if elapsed >= self._config.buy_timeout_seconds:
+                logger.info(
+                    f"[scalping][{self._stock_name}] 매수 타임아웃 "
+                    f"({elapsed:.0f}초) → 취소 후 재시도"
+                )
+                self._cancel_buy_and_return_to_monitoring()
+                return
+
+        # WS 정상이면 REST 폴링 스킵
+        if self._ws_client and self._ws_client.is_order_notice_active:
+            return
+
+        # REST fallback: throttle 적용
         if self._last_order_check_time:
             elapsed = (timestamp - self._last_order_check_time).total_seconds()
             if elapsed < self._order_check_interval:
-                # 스로틀링 중이라도 타임아웃은 확인
-                if self._buy_order_time:
-                    total_elapsed = (timestamp - self._buy_order_time).total_seconds()
-                    if total_elapsed >= self._config.buy_timeout_seconds:
-                        logger.info(
-                            f"[scalping][{self._stock_name}] 매수 타임아웃 "
-                            f"({total_elapsed:.0f}초) → 취소 후 재시도"
-                        )
-                        self._cancel_buy_and_return_to_monitoring()
                 return
         self._last_order_check_time = timestamp
 
-        # 체결 상태 조회 (get_balance API 호출)
+        # REST 체결 확인
         filled_qty, unfilled_qty = self._broker.get_order_status(
             self._buy_order_id,
             stock_code=self._stock_code,
@@ -313,26 +420,18 @@ class ScalpingExecutor:
             side=OrderSide.BUY,
         )
 
-        if filled_qty > 0:
-            # 체결된 수량 반영
+        if filled_qty > self._held_qty:
+            new_fills = filled_qty - self._held_qty
             self._update_position(filled_qty, self._buy_order_price)
+            logger.info(f"[REST 폴백] 매수 체결: +{new_fills}주")
 
         if unfilled_qty == 0 and filled_qty > 0:
-            # 전량 체결 → 매도 주문
+            # Full fill
             self._clear_buy_order()
             self._place_sell_order()
-            return
-
-        if filled_qty > 0 and unfilled_qty > 0:
-            # 부분 체결: POSITION_HELD로 전환 (매수 주문 유지)
+        elif filled_qty > 0:
+            # Partial fill
             self._transition(ScalpingState.POSITION_HELD)
-            logger.info(
-                f"[scalping][{self._stock_name}] 부분 매수 체결: "
-                f"{filled_qty}주 체결, {unfilled_qty}주 미체결"
-            )
-            return
-
-        # 미체결: 타임아웃 확인
         if self._buy_order_time:
             elapsed = (timestamp - self._buy_order_time).total_seconds()
             if elapsed >= self._config.buy_timeout_seconds:
@@ -344,28 +443,38 @@ class ScalpingExecutor:
 
     def _handle_position_held(self, price: int, timestamp: datetime) -> None:
         """
-        POSITION_HELD: 매수 체결(부분 포함), 매도 조건 모니터링
+        POSITION_HELD: 부분 체결 후 TP 모니터링
 
-        - 매수 주문이 남아있으면 추가 체결 확인
-        - 현재가가 +0.1% 도달 시 매도 + 매수 취소
+        - 매수 주문 남아있으면 추가 체결 확인 (WS 우선, REST 폴백)
+        - 현재가 ≥ +0.1% 도달 시 매수 취소 + 전량 매도
+        - SL 체크 (매 틱)
         """
-        # 매수 주문이 남아있으면 추가 체결 확인
+        # 매수 주문 남아있으면 추가 체결 확인 (REST 폴백만)
         if self._buy_order_id:
-            filled_qty, unfilled_qty = self._broker.get_order_status(
-                self._buy_order_id,
-                stock_code=self._stock_code,
-                order_qty=self._buy_order_qty,
-                side=OrderSide.BUY,
-            )
-            if filled_qty > self._held_qty:
-                new_fills = filled_qty - self._held_qty
-                self._update_position(filled_qty, self._buy_order_price)
-                logger.info(
-                    f"[scalping][{self._stock_name}] 추가 매수 체결: +{new_fills}주"
-                )
+            # WS 정상이면 REST 스킵
+            if not (self._ws_client and self._ws_client.is_order_notice_active):
+                # REST fallback (throttled)
+                if self._last_order_check_time:
+                    elapsed = (timestamp - self._last_order_check_time).total_seconds()
+                    if elapsed < self._order_check_interval:
+                        pass  # 다음 틱 대기
+                    else:
+                        self._last_order_check_time = timestamp
+                        filled_qty, unfilled_qty = self._broker.get_order_status(
+                            self._buy_order_id,
+                            stock_code=self._stock_code,
+                            order_qty=self._buy_order_qty,
+                            side=OrderSide.BUY,
+                        )
+                        if filled_qty > self._held_qty:
+                            new_fills = filled_qty - self._held_qty
+                            self._update_position(filled_qty, self._buy_order_price)
+                            logger.info(f"[REST 폴백] 추가 매수 체결: +{new_fills}주")
 
-            if unfilled_qty == 0:
-                self._clear_buy_order()
+                        if unfilled_qty == 0:
+                            self._clear_buy_order()
+                else:
+                    self._last_order_check_time = timestamp
 
         if self._held_qty <= 0:
             self._transition(ScalpingState.MONITORING)
@@ -375,13 +484,14 @@ class ScalpingExecutor:
         sell_target = self._calculate_sell_price(self._held_avg_price)
         if price >= sell_target:
             logger.info(
-                f"[scalping][{self._stock_name}] 매도 조건 도달: "
+                f"[scalping][{self._stock_name}] TP 도달: "
                 f"현재가 {price:,} >= 목표가 {sell_target:,}"
             )
             # 매수 주문 남아있으면 먼저 취소
             if self._buy_order_id:
                 self._cancel_buy_order()
-                # 취소 후 최종 체결량 재확인
+
+                # 취소 후 최종 체결량 재확인 (취소 중 체결 가능)
                 final_filled, _ = self._broker.get_order_status(
                     self._buy_order_id,
                     stock_code=self._stock_code,
@@ -390,14 +500,23 @@ class ScalpingExecutor:
                 )
                 if final_filled > self._held_qty:
                     self._update_position(final_filled, self._buy_order_price)
+                    logger.info(f"[취소 중 체결] +{final_filled - self._held_qty}주")
                 self._clear_buy_order()
 
-            self._place_sell_order()
+            # 부분체결 상황 → 시장가 매도
+            self._market_sell_all("부분체결 TP 도달")
+
+        # SL 체크 (매 틱)
+        if self._signal_ctx and price <= self._signal_ctx.sl_price:
+            logger.warning(f"[scalping][{self._stock_name}] SL 도달 → 시장가 매도")
+            if self._buy_order_id:
+                self._cancel_buy_order()
+                self._clear_buy_order()
+            self._market_sell_all("SL 도달")
 
     def _handle_sell_pending(self, price: int, timestamp: datetime) -> None:
-        """SELL_PENDING: 매도 체결 확인, SL 모니터링"""
+        """SELL_PENDING: REST 폴백 + SL 모니터링 (WS가 우선)"""
         if not self._sell_order_id:
-            # 매도 주문 없으면 (비정상)
             if self._held_qty > 0:
                 self._transition(ScalpingState.POSITION_HELD)
             else:
@@ -405,23 +524,25 @@ class ScalpingExecutor:
                 self._cooldown_start = timestamp
             return
 
-        # SL 체크 (WebSocket 가격만 사용, API 호출 없음 - 매 틱 실행)
+        # SL 체크 (매 틱, API 호출 없음)
         if self._signal_ctx and price <= self._signal_ctx.sl_price:
-            logger.warning(
-                f"[scalping][{self._stock_name}] 매도 대기 중 SL 도달 → 시장가 전환"
-            )
+            logger.warning(f"[scalping] 매도 대기 중 SL 도달 → 시장가 전환")
             self._cancel_sell_order()
             self._market_sell_all("매도 대기 중 SL 도달")
             return
 
-        # 체결 확인 스로틀링 (N초마다 한 번만 API 호출)
+        # WS 정상이면 REST 폴링 스킵
+        if self._ws_client and self._ws_client.is_order_notice_active:
+            return
+
+        # REST 폴백: 스로틀링 적용
         if self._last_order_check_time:
             elapsed = (timestamp - self._last_order_check_time).total_seconds()
             if elapsed < self._order_check_interval:
                 return
         self._last_order_check_time = timestamp
 
-        # 체결 확인 (get_balance API 호출)
+        # REST 체결 확인
         filled_qty, unfilled_qty = self._broker.get_order_status(
             self._sell_order_id,
             stock_code=self._stock_code,
@@ -430,27 +551,17 @@ class ScalpingExecutor:
         )
 
         if unfilled_qty == 0 and filled_qty > 0:
-            # 전량 매도 체결
+            # Full sell fill
             pnl = int((self._sell_order_price - self._held_avg_price) * filled_qty)
             logger.info(
-                f"[scalping][{self._stock_name}] 매도 체결: "
-                f"{self._sell_order_price:,}원 x {filled_qty}주, "
-                f"손익: {pnl:,}원"
+                f"[scalping][{self._stock_name}] 매도 체결 (REST 폴백): "
+                f"{self._sell_order_price:,}원 x {filled_qty}주, 손익: {pnl:,}원"
             )
             self._record_cycle_complete(pnl)
             self._clear_sell_order()
             self._clear_position()
             self._cooldown_start = timestamp
             self._transition(ScalpingState.COOLDOWN)
-            return
-
-        if filled_qty > 0 and unfilled_qty > 0:
-            # 부분 매도: 유지
-            logger.debug(
-                f"[scalping][{self._stock_name}] 부분 매도: "
-                f"{filled_qty}주 체결, {unfilled_qty}주 대기"
-            )
-            return
 
     def _handle_cooldown(self, price: int, timestamp: datetime) -> None:
         """COOLDOWN: 사이클 쿨다운 후 MONITORING 복귀"""
