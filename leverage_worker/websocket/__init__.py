@@ -5,12 +5,15 @@ WebSocket 실시간 데이터 패키지
 """
 
 from leverage_worker.websocket.exit_monitor import ExitMonitor, ExitMonitorConfig
+from leverage_worker.websocket.order_notice_handler import OrderNoticeData, OrderNoticeHandler
 from leverage_worker.websocket.tick_handler import TickData, TickHandler
 from leverage_worker.websocket.ws_client import RealtimeWSClient
 
 __all__ = [
     "ExitMonitor",
     "ExitMonitorConfig",
+    "OrderNoticeData",
+    "OrderNoticeHandler",
     "TickData",
     "TickHandler",
     "RealtimeWSClient",

@@ -8,6 +8,7 @@ KISWebSocket을 래핑하여 별도 스레드에서 실행
 import asyncio
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -64,6 +65,8 @@ class RealtimeWSClient:
         self._kws: Optional[ka.KISWebSocket] = None
         self._running = False
         self._stock_codes: List[str] = []
+        self._order_notice_subscribed = False
+        self._last_ws_data_time: Optional[datetime] = None
 
     def start(self, stock_codes: List[str]) -> None:
         """
@@ -114,6 +117,8 @@ class RealtimeWSClient:
             if self._ws_thread.is_alive():
                 logger.warning("WebSocket thread did not terminate in time")
         self._ws_thread = None
+        self._order_notice_subscribed = False
+        self._last_ws_data_time = None
 
         logger.info("WebSocket client stopped")
 
@@ -135,6 +140,19 @@ class RealtimeWSClient:
                     data=[stock_code],
                 )
                 logger.info(f"Subscribed to {stock_code}")
+
+            # 체결통보 구독 (HTS ID 기반, 1회만)
+            if self._hts_id and self._on_order_notice:
+                env_dv = "demo" if self._is_paper else "real"
+                ka.KISWebSocket.subscribe(
+                    request=ccnl_notice,
+                    data=[self._hts_id],
+                    kwargs={"env_dv": env_dv},
+                )
+                self._order_notice_subscribed = True
+                logger.info(
+                    f"Subscribed to order notice (hts_id={self._hts_id}, env={env_dv})"
+                )
 
             # WebSocket 시작 (블로킹)
             self._kws.start(
@@ -163,9 +181,24 @@ class RealtimeWSClient:
         if not self._running:
             return
 
+        # WS 건강 상태 갱신 (모든 데이터 수신 시)
+        self._last_ws_data_time = datetime.now()
+
         # WebSocket 연결 객체 저장 (graceful close용)
         if self._ws is None:
             self._ws = ws
+
+        # H0STCNI0 (실전) / H0STCNI9 (모의) 체결통보 처리
+        if tr_id in ("H0STCNI0", "H0STCNI9"):
+            notice = self._order_notice_handler.parse(df)
+            if notice and self._on_order_notice:
+                logger.info(
+                    f"[WS] 체결통보: {notice.stock_code} "
+                    f"{'매도' if notice.side == '01' else '매수'} "
+                    f"x{notice.filled_qty} @ {notice.filled_price:,}원"
+                )
+                self._on_order_notice(notice)
+            return
 
         # H0STCNT0 (체결가)만 처리
         if tr_id != "H0STCNT0":
@@ -185,3 +218,12 @@ class RealtimeWSClient:
     def is_running(self) -> bool:
         """실행 중 여부"""
         return self._running
+
+    @property
+    def is_order_notice_active(self) -> bool:
+        """WebSocket 체결통보 수신 가능 여부 (10초 이내 데이터 수신 = 정상)"""
+        if not self._running or not self._order_notice_subscribed:
+            return False
+        if self._last_ws_data_time is None:
+            return False
+        return (datetime.now() - self._last_ws_data_time).total_seconds() < 10

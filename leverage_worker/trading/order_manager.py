@@ -8,6 +8,7 @@
 - 감사 추적 (SQLite)
 """
 
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -109,6 +110,9 @@ class OrderManager:
 
         # 감사 추적 로거
         self._audit = get_audit_logger()
+
+        # 주문 상태 보호용 lock (RLock: _handle_fill에서 콜백 재진입 가능)
+        self._order_lock = threading.RLock()
 
         logger.info("OrderManager initialized")
 
@@ -260,8 +264,9 @@ class OrderManager:
             signal_price=signal_price,
         )
 
-        self._active_orders[result.order_id] = order
-        self._pending_stocks.add(stock_code)
+        with self._order_lock:
+            self._active_orders[result.order_id] = order
+            self._pending_stocks.add(stock_code)
 
         # DB 저장
         self._save_order_to_db(order)
@@ -369,9 +374,10 @@ class OrderManager:
             signal_price=signal_price,
             original_quantity=quantity,  # 원래 목표 수량 저장 (정정 시에도 유지)
         )
-        self._active_orders[order_id] = order
-        self._pending_stocks.add(stock_code)
-        order.is_chase_in_progress = True  # 추격매수 진행 중 표시
+        with self._order_lock:
+            self._active_orders[order_id] = order
+            self._pending_stocks.add(stock_code)
+            order.is_chase_in_progress = True  # 추격매수 진행 중 표시
 
         # DB 저장
         self._save_order_to_db(order)
@@ -396,105 +402,156 @@ class OrderManager:
         cumulative_pre_modify_cost = 0   # 정정 이전 체결분의 누적 비용
         cumulative_pre_modify_fills = 0  # 정정 이전 체결분의 누적 수량
 
-        for retry in range(max_retry):
-            time.sleep(interval)  # 대기
+        try:
+            for retry in range(max_retry):
+                time.sleep(interval)  # 대기
 
-            # 체결 상태 확인
-            filled_qty, unfilled_qty = self._broker.get_order_status(order_id)
-            total_filled = filled_qty
+                # 체결 상태 확인
+                filled_qty, unfilled_qty = self._broker.get_order_status(order_id)
+                total_filled = filled_qty
 
-            if unfilled_qty == 0:
-                # 전량 체결 완료
-                logger.info(f"[{stock_code}] 전량 체결 완료: {total_filled}주")
+                if unfilled_qty == 0:
+                    # 전량 체결 완료
+                    logger.info(f"[{stock_code}] 전량 체결 완료: {total_filled}주")
 
-                # 체결가 조회
-                broker_orders = self._broker.get_today_orders()
-                broker_order = next(
-                    (o for o in broker_orders if o.order_id == order_id), None
-                )
-                filled_price = broker_order.filled_price if broker_order else current_price
-
-                # 아직 포지션에 추가되지 않은 체결분 처리
-                if total_filled > order.filled_qty:
-                    new_filled = total_filled - order.filled_qty
-                    self._position_manager.add_position(
-                        stock_code=stock_code,
-                        stock_name=stock_name,
-                        quantity=new_filled,
-                        avg_price=filled_price,
-                        current_price=filled_price,
-                        strategy_name=strategy_name,
-                        order_id=order_id,
+                    # 체결가 조회
+                    broker_orders = self._broker.get_today_orders()
+                    broker_order = next(
+                        (o for o in broker_orders if o.order_id == order_id), None
                     )
-                    order.filled_qty = total_filled
-                    order.filled_price = filled_price
+                    filled_price = broker_order.filled_price if broker_order else current_price
 
-                    # 콜백 호출 (Slack 알림 + ExitMonitor 등록)
-                    try:
-                        if self._on_fill_callback:
-                            self._on_fill_callback(order, new_filled, 0.0)
-                    except Exception as e:
-                        logger.error(f"[{stock_code}] 체결 콜백 에러: {e}")
+                    # 아직 포지션에 추가되지 않은 체결분 처리
+                    if total_filled > order.filled_qty:
+                        new_filled = total_filled - order.filled_qty
+                        self._position_manager.add_position(
+                            stock_code=stock_code,
+                            stock_name=stock_name,
+                            quantity=new_filled,
+                            avg_price=filled_price,
+                            current_price=filled_price,
+                            strategy_name=strategy_name,
+                            order_id=order_id,
+                        )
+                        order.filled_qty = total_filled
+                        order.filled_price = filled_price
 
-                # 상태 정리
-                order.state = OrderState.FILLED
-                order.is_chase_in_progress = False
-                self._pending_stocks.discard(stock_code)
-                self._update_order_in_db(order)
-                break
+                        # 콜백 호출 (Slack 알림 + ExitMonitor 등록)
+                        try:
+                            if self._on_fill_callback:
+                                self._on_fill_callback(order, new_filled, 0.0)
+                        except Exception as e:
+                            logger.error(f"[{stock_code}] 체결 콜백 에러: {e}")
 
-            # 미체결 있음 → 매도호가1 재조회
-            new_ask_price = self._broker.get_asking_price(stock_code)
-            if not new_ask_price or new_ask_price <= 0:
-                logger.warning(f"[{stock_code}] 매도호가1 재조회 실패, 대기")
-                continue
+                    # 상태 정리
+                    with self._order_lock:
+                        order.state = OrderState.FILLED
+                        order.is_chase_in_progress = False
+                        self._pending_stocks.discard(stock_code)
+                    self._update_order_in_db(order)
+                    break
 
-            # 가격 변동 시에만 정정
-            if new_ask_price == current_price:
-                logger.debug(f"[{stock_code}] 가격 변동 없음, 대기 (미체결: {unfilled_qty}주)")
-                continue
+                # 미체결 있음 → 매도호가1 재조회
+                new_ask_price = self._broker.get_asking_price(stock_code)
+                if not new_ask_price or new_ask_price <= 0:
+                    logger.warning(f"[{stock_code}] 매도호가1 재조회 실패, 대기")
+                    continue
 
-            # 가격 상승 시 수량 재계산
-            if new_ask_price > current_price:
-                # 남은 예수금 = 초기 예수금 - (체결수량 * 체결가격들의 합)
-                # 간소화: 체결수량 * 현재 기준가격으로 계산
-                used_amount = cumulative_pre_modify_cost + (total_filled * current_price)
-                remaining_deposit = deposit - used_amount
+                # 가격 변동 시에만 정정
+                if new_ask_price == current_price:
+                    logger.debug(f"[{stock_code}] 가격 변동 없음, 대기 (미체결: {unfilled_qty}주)")
+                    continue
 
-                # 새 가격으로 주문 가능한 수량
-                affordable_qty = remaining_deposit // new_ask_price
-                new_order_qty = min(unfilled_qty, affordable_qty)
+                # 가격 상승 시 수량 재계산
+                if new_ask_price > current_price:
+                    # 남은 예수금 = 초기 예수금 - (체결수량 * 체결가격들의 합)
+                    # 간소화: 체결수량 * 현재 기준가격으로 계산
+                    used_amount = cumulative_pre_modify_cost + (total_filled * current_price)
+                    remaining_deposit = deposit - used_amount
 
-                if new_order_qty < unfilled_qty:
+                    # 새 가격으로 주문 가능한 수량
+                    affordable_qty = remaining_deposit // new_ask_price
+                    new_order_qty = min(unfilled_qty, affordable_qty)
+
+                    if new_order_qty < unfilled_qty:
+                        logger.info(
+                            f"[{stock_code}] 가격 상승으로 수량 조정: "
+                            f"{unfilled_qty}주 → {new_order_qty}주 "
+                            f"(가격: {current_price:,} → {new_ask_price:,})"
+                        )
+                else:
+                    new_order_qty = unfilled_qty
+
+                if new_order_qty <= 0:
+                    logger.warning(f"[{stock_code}] 예수금 부족으로 추가 매수 불가")
+                    break
+
+                # 정정 직전 체결 상태 재확인 (race condition 방지)
+                latest_filled, latest_unfilled = self._broker.get_order_status(order_id)
+                if latest_unfilled == 0:
+                    # 정정 전에 전량 체결됨
+                    logger.info(f"[{stock_code}] 정정 전 전량 체결 완료: {latest_filled}주")
+                    total_filled = latest_filled
+
+                    # 체결가 조회
+                    broker_orders = self._broker.get_today_orders()
+                    broker_order = next(
+                        (o for o in broker_orders if o.order_id == order_id), None
+                    )
+                    filled_price = broker_order.filled_price if broker_order else current_price
+
+                    # 아직 포지션에 추가되지 않은 체결분 처리
+                    if total_filled > order.filled_qty:
+                        new_filled = total_filled - order.filled_qty
+                        self._position_manager.add_position(
+                            stock_code=stock_code,
+                            stock_name=stock_name,
+                            quantity=new_filled,
+                            avg_price=filled_price,
+                            current_price=filled_price,
+                            strategy_name=strategy_name,
+                            order_id=order_id,
+                        )
+                        order.filled_qty = total_filled
+                        order.filled_price = filled_price
+
+                        # 콜백 호출 (Slack 알림 + ExitMonitor 등록)
+                        try:
+                            if self._on_fill_callback:
+                                self._on_fill_callback(order, new_filled, 0.0)
+                        except Exception as e:
+                            logger.error(f"[{stock_code}] 체결 콜백 에러: {e}")
+
+                    # 상태 정리
+                    with self._order_lock:
+                        order.state = OrderState.FILLED
+                        order.is_chase_in_progress = False
+                        self._pending_stocks.discard(stock_code)
+                    self._update_order_in_db(order)
+                    break
+
+                # 실제 미체결 수량으로 정정 수량 조정
+                if latest_unfilled < new_order_qty:
                     logger.info(
-                        f"[{stock_code}] 가격 상승으로 수량 조정: "
-                        f"{unfilled_qty}주 → {new_order_qty}주 "
-                        f"(가격: {current_price:,} → {new_ask_price:,})"
+                        f"[{stock_code}] 체결 진행으로 수량 재조정: "
+                        f"{new_order_qty}주 → {latest_unfilled}주"
                     )
-            else:
-                new_order_qty = unfilled_qty
+                    new_order_qty = latest_unfilled
+                    total_filled = latest_filled
 
-            if new_order_qty <= 0:
-                logger.warning(f"[{stock_code}] 예수금 부족으로 추가 매수 불가")
-                break
+                # 정정 전 체결분을 포지션에 즉시 추가 (누락 방지)
+                if latest_filled > order.filled_qty:
+                    new_filled = latest_filled - order.filled_qty
 
-            # 정정 직전 체결 상태 재확인 (race condition 방지)
-            latest_filled, latest_unfilled = self._broker.get_order_status(order_id)
-            if latest_unfilled == 0:
-                # 정정 전에 전량 체결됨
-                logger.info(f"[{stock_code}] 정정 전 전량 체결 완료: {latest_filled}주")
-                total_filled = latest_filled
+                    # 체결가 조회
+                    broker_orders = self._broker.get_today_orders()
+                    broker_order = next(
+                        (o for o in broker_orders if o.order_id == order_id),
+                        None
+                    )
+                    filled_price = broker_order.filled_price if broker_order else current_price
 
-                # 체결가 조회
-                broker_orders = self._broker.get_today_orders()
-                broker_order = next(
-                    (o for o in broker_orders if o.order_id == order_id), None
-                )
-                filled_price = broker_order.filled_price if broker_order else current_price
-
-                # 아직 포지션에 추가되지 않은 체결분 처리
-                if total_filled > order.filled_qty:
-                    new_filled = total_filled - order.filled_qty
+                    # 포지션에 추가
                     self._position_manager.add_position(
                         stock_code=stock_code,
                         stock_name=stock_name,
@@ -504,8 +561,12 @@ class OrderManager:
                         strategy_name=strategy_name,
                         order_id=order_id,
                     )
-                    order.filled_qty = total_filled
+                    order.filled_qty = latest_filled
                     order.filled_price = filled_price
+                    logger.info(
+                        f"[{stock_code}] 정정 전 부분 체결 포지션 추가: "
+                        f"{new_filled}주 @ {filled_price:,}원 (누적: {order.filled_qty}주)"
+                    )
 
                     # 콜백 호출 (Slack 알림 + ExitMonitor 등록)
                     try:
@@ -514,25 +575,42 @@ class OrderManager:
                     except Exception as e:
                         logger.error(f"[{stock_code}] 체결 콜백 에러: {e}")
 
-                # 상태 정리
-                order.state = OrderState.FILLED
-                order.is_chase_in_progress = False
-                self._pending_stocks.discard(stock_code)
-                self._update_order_in_db(order)
-                break
+                # 정정 주문
+                new_order_id = self._broker.modify_order(order_id, order_branch, new_order_qty, new_ask_price)
+                if new_order_id:
+                    # 주문번호가 변경된 경우 추적 업데이트
+                    if new_order_id != order_id:
+                        with self._order_lock:
+                            self._active_orders.pop(order_id, None)
+                            order.order_id = new_order_id
+                            self._active_orders[new_order_id] = order
+                        logger.info(f"[{stock_code}] 주문번호 변경: {order_id} -> {new_order_id}")
+                        order_id = new_order_id  # 이후 루프에서 새 ID 사용
 
-            # 실제 미체결 수량으로 정정 수량 조정
-            if latest_unfilled < new_order_qty:
-                logger.info(
-                    f"[{stock_code}] 체결 진행으로 수량 재조정: "
-                    f"{new_order_qty}주 → {latest_unfilled}주"
-                )
-                new_order_qty = latest_unfilled
-                total_filled = latest_filled
+                    # 정정 이전 체결 비용/수량 누적 (새 주문은 체결 0에서 시작)
+                    cumulative_pre_modify_cost += order.filled_qty * current_price
+                    cumulative_pre_modify_fills += order.filled_qty
+                    order.filled_qty = 0  # 새 주문은 체결 이력 0에서 시작
 
-            # 정정 전 체결분을 포지션에 즉시 추가 (누락 방지)
-            if latest_filled > order.filled_qty:
-                new_filled = latest_filled - order.filled_qty
+                    # ManagedOrder 상태 업데이트
+                    order.quantity = new_order_qty
+                    order.price = new_ask_price
+                    order.updated_at = datetime.now()
+
+                    current_price = new_ask_price
+                    logger.info(
+                        f"[{stock_code}] 정정 주문 #{retry+1}: "
+                        f"{new_order_qty}주 @ {new_ask_price:,}원"
+                    )
+                else:
+                    logger.warning(f"[{stock_code}] 정정 주문 실패")
+
+            # 최종 상태 로그
+            final_filled, final_unfilled = self._broker.get_order_status(order_id)
+
+            # 루프 종료 후 아직 포지션에 추가되지 않은 최종 체결분 처리
+            if final_filled > order.filled_qty:
+                remaining_filled = final_filled - order.filled_qty
 
                 # 체결가 조회
                 broker_orders = self._broker.get_today_orders()
@@ -546,163 +624,103 @@ class OrderManager:
                 self._position_manager.add_position(
                     stock_code=stock_code,
                     stock_name=stock_name,
-                    quantity=new_filled,
+                    quantity=remaining_filled,
                     avg_price=filled_price,
                     current_price=filled_price,
                     strategy_name=strategy_name,
                     order_id=order_id,
                 )
-                order.filled_qty = latest_filled
+                order.filled_qty = final_filled
                 order.filled_price = filled_price
                 logger.info(
-                    f"[{stock_code}] 정정 전 부분 체결 포지션 추가: "
-                    f"{new_filled}주 @ {filled_price:,}원 (누적: {order.filled_qty}주)"
+                    f"[{stock_code}] 최종 체결분 포지션 추가: "
+                    f"{remaining_filled}주 @ {filled_price:,}원 (총 체결: {order.filled_qty}주)"
                 )
 
                 # 콜백 호출 (Slack 알림 + ExitMonitor 등록)
                 try:
                     if self._on_fill_callback:
-                        self._on_fill_callback(order, new_filled, 0.0)
+                        self._on_fill_callback(order, remaining_filled, 0.0)
                 except Exception as e:
                     logger.error(f"[{stock_code}] 체결 콜백 에러: {e}")
 
-            # 정정 주문
-            new_order_id = self._broker.modify_order(order_id, order_branch, new_order_qty, new_ask_price)
-            if new_order_id:
-                # 주문번호가 변경된 경우 추적 업데이트
-                if new_order_id != order_id:
-                    self._active_orders.pop(order_id, None)
-                    order.order_id = new_order_id
-                    self._active_orders[new_order_id] = order
-                    logger.info(f"[{stock_code}] 주문번호 변경: {order_id} -> {new_order_id}")
-                    order_id = new_order_id  # 이후 루프에서 새 ID 사용
+            if final_unfilled > 0:
+                # 1) 미체결분 취소 요청
+                cancel_result = self._broker.cancel_order(order_id, order_branch, final_unfilled)
 
-                # 정정 이전 체결 비용/수량 누적 (새 주문은 체결 0에서 시작)
-                cumulative_pre_modify_cost += order.filled_qty * current_price
-                cumulative_pre_modify_fills += order.filled_qty
-                order.filled_qty = 0  # 새 주문은 체결 이력 0에서 시작
+                # 2) 취소 후 최종 체결 상태 재확인 (취소 중 체결된 수량 확인)
+                post_cancel_filled, post_cancel_unfilled = self._broker.get_order_status(order_id)
 
-                # ManagedOrder 상태 업데이트
-                order.quantity = new_order_qty
-                order.price = new_ask_price
-                order.updated_at = datetime.now()
+                # 3) 취소 동안 추가 체결된 수량이 있으면 포지션에 추가
+                if post_cancel_filled > order.filled_qty:
+                    additional_filled = post_cancel_filled - order.filled_qty
 
-                current_price = new_ask_price
-                logger.info(
-                    f"[{stock_code}] 정정 주문 #{retry+1}: "
-                    f"{new_order_qty}주 @ {new_ask_price:,}원"
-                )
-            else:
-                logger.warning(f"[{stock_code}] 정정 주문 실패")
+                    # 체결가 조회
+                    broker_orders = self._broker.get_today_orders()
+                    broker_order = next(
+                        (o for o in broker_orders if o.order_id == order_id), None
+                    )
+                    filled_price = broker_order.filled_price if broker_order else current_price
 
-        # 최종 상태 로그
-        final_filled, final_unfilled = self._broker.get_order_status(order_id)
+                    # 포지션에 추가
+                    self._position_manager.add_position(
+                        stock_code=stock_code,
+                        stock_name=stock_name,
+                        quantity=additional_filled,
+                        avg_price=filled_price,
+                        current_price=filled_price,
+                        strategy_name=strategy_name,
+                        order_id=order_id,
+                    )
+                    order.filled_qty = post_cancel_filled
+                    order.filled_price = filled_price
+                    logger.info(
+                        f"[{stock_code}] 취소 중 추가 체결 포지션 추가: "
+                        f"{additional_filled}주 @ {filled_price:,}원 (총 체결: {order.filled_qty}주)"
+                    )
 
-        # 루프 종료 후 아직 포지션에 추가되지 않은 최종 체결분 처리
-        if final_filled > order.filled_qty:
-            remaining_filled = final_filled - order.filled_qty
+                    # 콜백 호출 (Slack 알림 + ExitMonitor 등록)
+                    try:
+                        if self._on_fill_callback:
+                            self._on_fill_callback(order, additional_filled, 0.0)
+                    except Exception as e:
+                        logger.error(f"[{stock_code}] 체결 콜백 에러: {e}")
 
-            # 체결가 조회
-            broker_orders = self._broker.get_today_orders()
-            broker_order = next(
-                (o for o in broker_orders if o.order_id == order_id),
-                None
-            )
-            filled_price = broker_order.filled_price if broker_order else current_price
+                # 4) 상태 업데이트 및 로그
+                if cancel_result:
+                    cancelled_qty = final_unfilled - (post_cancel_filled - final_filled)
+                    logger.info(
+                        f"[{stock_code}] 추격매수 종료: {post_cancel_filled}주 체결, "
+                        f"{cancelled_qty}주 취소"
+                    )
+                else:
+                    logger.warning(
+                        f"[{stock_code}] 미체결 취소 실패 - 수동 확인 필요"
+                    )
 
-            # 포지션에 추가
-            self._position_manager.add_position(
-                stock_code=stock_code,
-                stock_name=stock_name,
-                quantity=remaining_filled,
-                avg_price=filled_price,
-                current_price=filled_price,
-                strategy_name=strategy_name,
-                order_id=order_id,
-            )
-            order.filled_qty = final_filled
-            order.filled_price = filled_price
-            logger.info(
-                f"[{stock_code}] 최종 체결분 포지션 추가: "
-                f"{remaining_filled}주 @ {filled_price:,}원 (총 체결: {order.filled_qty}주)"
-            )
-
-            # 콜백 호출 (Slack 알림 + ExitMonitor 등록)
-            try:
-                if self._on_fill_callback:
-                    self._on_fill_callback(order, remaining_filled, 0.0)
-            except Exception as e:
-                logger.error(f"[{stock_code}] 체결 콜백 에러: {e}")
-
-        if final_unfilled > 0:
-            # 1) 미체결분 취소 요청
-            cancel_result = self._broker.cancel_order(order_id, order_branch, final_unfilled)
-
-            # 2) 취소 후 최종 체결 상태 재확인 (취소 중 체결된 수량 확인)
-            post_cancel_filled, post_cancel_unfilled = self._broker.get_order_status(order_id)
-
-            # 3) 취소 동안 추가 체결된 수량이 있으면 포지션에 추가
-            if post_cancel_filled > order.filled_qty:
-                additional_filled = post_cancel_filled - order.filled_qty
-
-                # 체결가 조회
-                broker_orders = self._broker.get_today_orders()
-                broker_order = next(
-                    (o for o in broker_orders if o.order_id == order_id), None
-                )
-                filled_price = broker_order.filled_price if broker_order else current_price
-
-                # 포지션에 추가
-                self._position_manager.add_position(
-                    stock_code=stock_code,
-                    stock_name=stock_name,
-                    quantity=additional_filled,
-                    avg_price=filled_price,
-                    current_price=filled_price,
-                    strategy_name=strategy_name,
-                    order_id=order_id,
-                )
-                order.filled_qty = post_cancel_filled
-                order.filled_price = filled_price
-                logger.info(
-                    f"[{stock_code}] 취소 중 추가 체결 포지션 추가: "
-                    f"{additional_filled}주 @ {filled_price:,}원 (총 체결: {order.filled_qty}주)"
-                )
-
-                # 콜백 호출 (Slack 알림 + ExitMonitor 등록)
-                try:
-                    if self._on_fill_callback:
-                        self._on_fill_callback(order, additional_filled, 0.0)
-                except Exception as e:
-                    logger.error(f"[{stock_code}] 체결 콜백 에러: {e}")
-
-            # 4) 상태 업데이트 및 로그
-            if cancel_result:
-                cancelled_qty = final_unfilled - (post_cancel_filled - final_filled)
-                logger.info(
-                    f"[{stock_code}] 추격매수 종료: {post_cancel_filled}주 체결, "
-                    f"{cancelled_qty}주 취소"
-                )
-            else:
-                logger.warning(
-                    f"[{stock_code}] 미체결 취소 실패 - 수동 확인 필요"
-                )
-
-            # 5) pending 상태 정리
-            order.state = OrderState.PARTIAL if order.filled_qty > 0 else OrderState.CANCELLED
-            order.is_chase_in_progress = False  # 추격매수 종료
-            self._pending_stocks.discard(stock_code)
-            self._update_order_in_db(order)
-        else:
-            # 10회 정정 후 전량 체결된 경우 상태 정리
-            if order.state != OrderState.FILLED:
-                order.state = OrderState.FILLED
-                order.is_chase_in_progress = False
-                self._pending_stocks.discard(stock_code)
+                # 5) pending 상태 정리
+                with self._order_lock:
+                    order.state = OrderState.PARTIAL if order.filled_qty > 0 else OrderState.CANCELLED
+                    order.is_chase_in_progress = False  # 추격매수 종료
+                    self._pending_stocks.discard(stock_code)
                 self._update_order_in_db(order)
+            else:
+                # 10회 정정 후 전량 체결된 경우 상태 정리
+                if order.state != OrderState.FILLED:
+                    with self._order_lock:
+                        order.state = OrderState.FILLED
+                        order.is_chase_in_progress = False
+                        self._pending_stocks.discard(stock_code)
+                    self._update_order_in_db(order)
 
-        # 누적 체결 수량 반영 (외부 참조용: Slack 알림 등)
-        order.filled_qty += cumulative_pre_modify_fills
+            # 누적 체결 수량 반영 (외부 참조용: Slack 알림 등)
+            order.filled_qty += cumulative_pre_modify_fills
+
+        finally:
+            with self._order_lock:
+                if order.is_chase_in_progress:
+                    order.is_chase_in_progress = False
+                    logger.warning(f"[{stock_code}] chase flag forced cleanup")
 
         return order_id
 
@@ -780,8 +798,9 @@ class OrderManager:
             avg_price=avg_price_for_pnl,
         )
 
-        self._active_orders[result.order_id] = order
-        self._pending_stocks.add(stock_code)
+        with self._order_lock:
+            self._active_orders[result.order_id] = order
+            self._pending_stocks.add(stock_code)
 
         # DB 저장
         self._save_order_to_db(order)
@@ -893,9 +912,10 @@ class OrderManager:
             avg_price=avg_price_for_pnl,
             branch_no=result.order_branch or "",
         )
-        self._active_orders[order_id] = order
-        self._pending_stocks.add(stock_code)
-        order.is_sell_fallback_in_progress = True  # check_fills 중복 방지
+        with self._order_lock:
+            self._active_orders[order_id] = order
+            self._pending_stocks.add(stock_code)
+            order.is_sell_fallback_in_progress = True  # check_fills 중복 방지
 
         # DB 저장
         self._save_order_to_db(order)
@@ -918,261 +938,345 @@ class OrderManager:
         # 2. 대기
         time.sleep(fallback_seconds)
 
-        # 3. 체결 상태 확인
-        filled_qty, unfilled_qty = self._broker.get_order_status(order_id)
-
-        if unfilled_qty == 0:
-            # 전량 체결 완료
-            logger.info(f"[{stock_code}] 지정가 매도 전량 체결: {filled_qty}주 @ {limit_price:,}원")
-
-            # 체결 처리 + 상태 정리
-            if order_id in self._active_orders:
-                order = self._active_orders[order_id]
-                broker_order = next(
-                    (o for o in self._broker.get_today_orders() if o.order_id == order_id),
-                    None
-                )
-                if broker_order:
-                    order.filled_qty = filled_qty
-                    order.filled_price = broker_order.filled_price
-                else:
-                    # broker_order 조회 실패해도 체결 처리는 진행 (filled_price는 limit_price 사용)
-                    logger.warning(f"[{stock_code}] 전량 체결 정보 조회 실패 (지정가 사용)")
-                    order.filled_qty = filled_qty
-                    order.filled_price = limit_price
-
-                # 포지션 업데이트 + 손익 계산 (콜백은 _handle_fill 내부에서 호출됨)
-                self._handle_fill(order, filled_qty)
-
-                # 상태 정리
-                order.state = OrderState.FILLED
-                order.is_sell_fallback_in_progress = False
-                del self._active_orders[order_id]
-
-            self._pending_stocks.discard(stock_code)
-            self._update_order_in_db(order)
-            return order_id
-
-        # 4. 미체결 있음 → 취소 후 시장가 전환
-        logger.info(
-            f"[{stock_code}] 지정가 매도 미체결: {unfilled_qty}주 → 시장가 전환"
-        )
-
-        # 취소 전에 order 참조 저장 (cancel_order가 _active_orders에서 제거하므로)
-        order = self._active_orders.get(order_id)
-
-        # 부분 체결분 처리 (취소 전에 먼저 처리)
-        if filled_qty > 0 and order:
-            # 체결가 조회
-            broker_order = next(
-                (o for o in self._broker.get_today_orders() if o.order_id == order_id),
-                None
-            )
-            if broker_order:
-                order.filled_qty = filled_qty
-                order.filled_price = broker_order.filled_price
-            else:
-                # broker_order 조회 실패해도 체결 처리는 진행 (filled_price는 limit_price 사용)
-                logger.warning(f"[{stock_code}] 부분 체결 정보 조회 실패: {filled_qty}주 체결됨 (지정가 사용)")
-                order.filled_qty = filled_qty
-                order.filled_price = limit_price
-
-            # 포지션 업데이트 + 손익 계산 (콜백은 _handle_fill 내부에서 호출됨)
-            self._handle_fill(order, filled_qty)
-
-        # 기존 주문 취소
-        if not self.cancel_order(order_id):
-            logger.warning(f"[{stock_code}] 지정가 주문 취소 실패, 체결 재확인")
-            # 취소 실패 시 체결 상태 재확인
+        try:
+            # 3. 체결 상태 확인
             filled_qty, unfilled_qty = self._broker.get_order_status(order_id)
-            if unfilled_qty == 0:
-                logger.info(f"[{stock_code}] 취소 실패했으나 전량 체결됨")
-                # 남은 체결분 처리 (콜백은 _handle_fill 내부에서 호출됨)
-                if order and order.filled_qty < filled_qty:
-                    additional = filled_qty - order.filled_qty
-                    order.filled_qty = filled_qty  # 콜백 호출 전에 업데이트
-                    order.filled_price = limit_price  # 체결가도 업데이트
-                    self._handle_fill(order, additional)
-                if order:
-                    order.is_sell_fallback_in_progress = False
-                self._pending_stocks.discard(stock_code)
-                return order_id
-        else:
-            # 취소 성공 후 - 체결 상태 재확인 (취소 중 추가 체결 가능)
-            final_filled, final_unfilled = self._broker.get_order_status(order_id)
 
-            # 취소 중 추가 체결분 처리 (저장된 order 참조 사용)
-            if final_filled > filled_qty and order:
-                additional_filled = final_filled - filled_qty
-                logger.info(f"[{stock_code}] 취소 중 추가 체결: {filled_qty}주 → {final_filled}주")
+            if unfilled_qty == 0:
+                # 전량 체결 완료
+                logger.info(f"[{stock_code}] 지정가 매도 전량 체결: {filled_qty}주 @ {limit_price:,}원")
+
+                # 체결 처리 + 상태 정리
+                with self._order_lock:
+                    if order_id in self._active_orders:
+                        order = self._active_orders[order_id]
+                    else:
+                        order = None
+
+                if order:
+                    broker_order = next(
+                        (o for o in self._broker.get_today_orders() if o.order_id == order_id),
+                        None
+                    )
+                    with self._order_lock:
+                        if broker_order:
+                            order.filled_qty = filled_qty
+                            order.filled_price = broker_order.filled_price
+                        else:
+                            logger.warning(f"[{stock_code}] 전량 체결 정보 조회 실패 (지정가 사용)")
+                            order.filled_qty = filled_qty
+                            order.filled_price = limit_price
+
+                        # 포지션 업데이트 + 손익 계산 (콜백은 _handle_fill 내부에서 호출됨)
+                        self._handle_fill(order, filled_qty)
+
+                        # 상태 정리
+                        order.state = OrderState.FILLED
+                        order.is_sell_fallback_in_progress = False
+                        self._active_orders.pop(order_id, None)
+
+                with self._order_lock:
+                    self._pending_stocks.discard(stock_code)
+                self._update_order_in_db(order)
+                return order_id
+
+            # 4. 미체결 있음 → 취소 후 시장가 전환
+            logger.info(
+                f"[{stock_code}] 지정가 매도 미체결: {unfilled_qty}주 → 시장가 전환"
+            )
+
+            # 취소 전에 order 참조 저장 (cancel_order가 _active_orders에서 제거하므로)
+            order = self._active_orders.get(order_id)
+
+            # 부분 체결분 처리 (취소 전에 먼저 처리)
+            if filled_qty > 0 and order:
+                # 체결가 조회
                 broker_order = next(
                     (o for o in self._broker.get_today_orders() if o.order_id == order_id),
                     None
                 )
-                if broker_order:
-                    order.filled_qty = final_filled
-                    order.filled_price = broker_order.filled_price
-                else:
-                    # broker_order 조회 실패해도 체결 처리는 진행 (filled_price는 limit_price 사용)
-                    logger.warning(f"[{stock_code}] 취소 중 체결 정보 조회 실패 (지정가 사용)")
-                    order.filled_qty = final_filled
-                    order.filled_price = limit_price
-                # 포지션 업데이트 + 손익 계산 (콜백은 _handle_fill 내부에서 호출됨)
-                self._handle_fill(order, additional_filled)
+                with self._order_lock:
+                    if broker_order:
+                        order.filled_qty = filled_qty
+                        order.filled_price = broker_order.filled_price
+                    else:
+                        logger.warning(f"[{stock_code}] 부분 체결 정보 조회 실패: {filled_qty}주 체결됨 (지정가 사용)")
+                        order.filled_qty = filled_qty
+                        order.filled_price = limit_price
 
-                filled_qty = final_filled
-                unfilled_qty = final_unfilled
+                    # 포지션 업데이트 + 손익 계산 (콜백은 _handle_fill 내부에서 호출됨)
+                    self._handle_fill(order, filled_qty)
 
-            # 전량 체결 완료 확인
-            if unfilled_qty == 0:
-                logger.info(f"[{stock_code}] 취소 완료 후 전량 체결 확인됨: {filled_qty}주")
+            # 기존 주문 취소
+            if not self.cancel_order(order_id):
+                logger.warning(f"[{stock_code}] 지정가 주문 취소 실패, 체결 재확인")
+                # 취소 실패 시 체결 상태 재확인
+                filled_qty, unfilled_qty = self._broker.get_order_status(order_id)
+                if unfilled_qty == 0:
+                    logger.info(f"[{stock_code}] 취소 실패했으나 전량 체결됨")
+                    # 남은 체결분 처리 (콜백은 _handle_fill 내부에서 호출됨)
+                    with self._order_lock:
+                        if order and order.filled_qty < filled_qty:
+                            additional = filled_qty - order.filled_qty
+                            order.filled_qty = filled_qty
+                            order.filled_price = limit_price
+                            self._handle_fill(order, additional)
+                        if order:
+                            order.is_sell_fallback_in_progress = False
+                        self._pending_stocks.discard(stock_code)
+                    return order_id
+            else:
+                # 취소 성공 후 - 체결 상태 재확인 (취소 중 추가 체결 가능)
+                final_filled, final_unfilled = self._broker.get_order_status(order_id)
+
+                # 취소 중 추가 체결분 처리 (저장된 order 참조 사용)
+                if final_filled > filled_qty and order:
+                    additional_filled = final_filled - filled_qty
+                    logger.info(f"[{stock_code}] 취소 중 추가 체결: {filled_qty}주 → {final_filled}주")
+                    broker_order = next(
+                        (o for o in self._broker.get_today_orders() if o.order_id == order_id),
+                        None
+                    )
+                    with self._order_lock:
+                        if broker_order:
+                            order.filled_qty = final_filled
+                            order.filled_price = broker_order.filled_price
+                        else:
+                            logger.warning(f"[{stock_code}] 취소 중 체결 정보 조회 실패 (지정가 사용)")
+                            order.filled_qty = final_filled
+                            order.filled_price = limit_price
+                        # 포지션 업데이트 + 손익 계산 (콜백은 _handle_fill 내부에서 호출됨)
+                        self._handle_fill(order, additional_filled)
+
+                    filled_qty = final_filled
+                    unfilled_qty = final_unfilled
+
+                # 전량 체결 완료 확인
+                if unfilled_qty == 0:
+                    logger.info(f"[{stock_code}] 취소 완료 후 전량 체결 확인됨: {filled_qty}주")
+                    with self._order_lock:
+                        self._pending_stocks.discard(stock_code)
+                        if order:
+                            order.is_sell_fallback_in_progress = False
+                    return order_id
+
+            # pending 상태 해제 (시장가 재주문을 위해)
+            with self._order_lock:
                 self._pending_stocks.discard(stock_code)
+                self._active_orders.pop(order_id, None)
+
+            # 시장가 매도 전 실제 잔고 확인
+            position = self._position_manager.get_position(stock_code)
+            actual_qty = position.quantity if position else 0
+
+            if actual_qty <= 0:
+                logger.warning(f"[{stock_code}] 시장가 전환 취소: 잔고 없음 (전량 체결됨)")
                 if order:
                     order.is_sell_fallback_in_progress = False
                 return order_id
 
-        # pending 상태 해제 (시장가 재주문을 위해)
-        self._pending_stocks.discard(stock_code)
-        if order_id in self._active_orders:
-            del self._active_orders[order_id]
+            if actual_qty < unfilled_qty:
+                logger.warning(f"[{stock_code}] 시장가 수량 조정: {unfilled_qty}주 → {actual_qty}주 (잔고 부족)")
+                unfilled_qty = actual_qty
 
-        # 시장가 매도 전 실제 잔고 확인
-        position = self._position_manager.get_position(stock_code)
-        actual_qty = position.quantity if position else 0
+            # 미체결 수량만큼 시장가 매도
+            logger.info(f"[{stock_code}] 시장가 매도 전환: {unfilled_qty}주")
 
-        if actual_qty <= 0:
-            logger.warning(f"[{stock_code}] 시장가 전환 취소: 잔고 없음 (전량 체결됨)")
-            if order:
-                order.is_sell_fallback_in_progress = False
-            return order_id
+            market_result = self._broker.place_market_order(stock_code, OrderSide.SELL, unfilled_qty)
 
-        if actual_qty < unfilled_qty:
-            logger.warning(f"[{stock_code}] 시장가 수량 조정: {unfilled_qty}주 → {actual_qty}주 (잔고 부족)")
-            unfilled_qty = actual_qty
+            if not market_result.success:
+                logger.error(f"[{stock_code}] 시장가 매도 전환 실패: {market_result.message}")
+                self._audit.log_order(
+                    event_type="ORDER_REJECTED",
+                    module="OrderManager",
+                    stock_code=stock_code,
+                    stock_name=stock_name,
+                    order_id=None,
+                    side="SELL",
+                    quantity=unfilled_qty,
+                    price=0,
+                    strategy_name=strategy_name or "",
+                    status="rejected",
+                    reason=f"market_fallback_failed: {market_result.message}",
+                )
+                # 상태 정리
+                if order:
+                    order.is_sell_fallback_in_progress = False
+                return order_id  # 부분 체결된 지정가 주문 ID 반환
 
-        # 미체결 수량만큼 시장가 매도
-        logger.info(f"[{stock_code}] 시장가 매도 전환: {unfilled_qty}주")
+            # 시장가 주문 등록 (동일한 avg_price 사용)
+            market_order = ManagedOrder(
+                order_id=market_result.order_id,
+                stock_code=stock_code,
+                stock_name=stock_name,
+                side=OrderSide.SELL,
+                quantity=unfilled_qty,
+                price=market_result.price,
+                strategy_name=strategy_name,
+                state=OrderState.SUBMITTED,
+                avg_price=avg_price_for_pnl,
+            )
+            with self._order_lock:
+                self._active_orders[market_result.order_id] = market_order
+                self._pending_stocks.add(stock_code)
 
-        market_result = self._broker.place_market_order(stock_code, OrderSide.SELL, unfilled_qty)
+            # DB 저장
+            self._save_order_to_db(market_order)
 
-        if not market_result.success:
-            logger.error(f"[{stock_code}] 시장가 매도 전환 실패: {market_result.message}")
+            # 감사 로그 기록
             self._audit.log_order(
-                event_type="ORDER_REJECTED",
+                event_type="ORDER_SUBMIT",
                 module="OrderManager",
                 stock_code=stock_code,
                 stock_name=stock_name,
-                order_id=None,
+                order_id=market_result.order_id,
                 side="SELL",
                 quantity=unfilled_qty,
-                price=0,
+                price=market_result.price,
                 strategy_name=strategy_name or "",
-                status="rejected",
-                reason=f"market_fallback_failed: {market_result.message}",
+                status="submitted",
+                reason="market_fallback_from_limit",
             )
-            # 상태 정리
-            if order:
-                order.is_sell_fallback_in_progress = False
-            return order_id  # 부분 체결된 지정가 주문 ID 반환
 
-        # 시장가 주문 등록 (동일한 avg_price 사용)
-        market_order = ManagedOrder(
-            order_id=market_result.order_id,
-            stock_code=stock_code,
-            stock_name=stock_name,
-            side=OrderSide.SELL,
-            quantity=unfilled_qty,
-            price=market_result.price,
-            strategy_name=strategy_name,
-            state=OrderState.SUBMITTED,
-            avg_price=avg_price_for_pnl,
-        )
-        self._active_orders[market_result.order_id] = market_order
-        self._pending_stocks.add(stock_code)
+            logger.info(
+                f"[{stock_code}] 시장가 매도 전환 완료: {unfilled_qty}주 (ID: {market_result.order_id})"
+            )
 
-        # DB 저장
-        self._save_order_to_db(market_order)
+            return market_result.order_id
+        finally:
+            with self._order_lock:
+                if order and order.is_sell_fallback_in_progress:
+                    order.is_sell_fallback_in_progress = False
+                    logger.warning(f"[{stock_code}] fallback flag forced cleanup")
 
-        # 감사 로그 기록
-        self._audit.log_order(
-            event_type="ORDER_SUBMIT",
-            module="OrderManager",
-            stock_code=stock_code,
-            stock_name=stock_name,
-            order_id=market_result.order_id,
-            side="SELL",
-            quantity=unfilled_qty,
-            price=market_result.price,
-            strategy_name=strategy_name or "",
-            status="submitted",
-            reason="market_fallback_from_limit",
-        )
+    def process_ws_fill(self, order_no: str, filled_qty: int, filled_price: int) -> Optional[ManagedOrder]:
+        """WebSocket 체결통보에서 직접 체결 처리 (증분 방식)
 
-        logger.info(
-            f"[{stock_code}] 시장가 매도 전환 완료: {unfilled_qty}주 (ID: {market_result.order_id})"
-        )
+        Args:
+            order_no: 주문번호
+            filled_qty: 체결수량 (이번 체결분)
+            filled_price: 체결단가
 
-        return market_result.order_id
+        Returns:
+            완료된 ManagedOrder 또는 None
+        """
+        with self._order_lock:
+            order = self._active_orders.get(order_no)
+            if not order:
+                logger.debug(f"WS fill: order {order_no} not in active orders")
+                return None
+
+            # Chase/Fallback 주문은 자체 fill loop에서 처리
+            if order.is_chase_in_progress or order.is_sell_fallback_in_progress:
+                # EC-2: 5분 이상 flag가 True면 leak으로 간주하여 강제 처리
+                elapsed = (datetime.now() - order.updated_at).total_seconds()
+                if elapsed < 300:
+                    logger.debug(f"WS fill: order {order_no} handled by chase/fallback")
+                    return None
+                logger.warning(
+                    f"Force processing stale order {order_no} (flag stuck {elapsed:.0f}s)"
+                )
+
+            # EC-3: overflow 방지 (중복 수신 대응)
+            actual_fill = min(filled_qty, order.remaining_qty)
+            if actual_fill <= 0:
+                logger.debug(f"WS fill: order {order_no} already fully filled")
+                return None
+
+            # 증분 업데이트
+            order.filled_qty += actual_fill
+            order.filled_price = filled_price
+            order.updated_at = datetime.now()
+
+            if order.filled_qty >= order.quantity:
+                order.state = OrderState.FILLED
+            else:
+                order.state = OrderState.PARTIAL
+
+            self._handle_fill(order, actual_fill)
+
+            if order.is_complete:
+                self._active_orders.pop(order_no, None)
+                self._pending_stocks.discard(order.stock_code)
+                self._update_order_in_db(order)
+                logger.info(
+                    f"Order completed (WS): {order.stock_code} {order.side.value} "
+                    f"x{order.filled_qty} @ {order.filled_price:,}"
+                )
+                return order
+        return None
 
     def check_fills(self) -> List[ManagedOrder]:
         """
-        체결 확인 및 포지션 업데이트
+        체결 확인 및 포지션 업데이트 (REST 폴백)
+
+        WS 비정상 시에만 호출됨. broker 절대값으로 동기화.
 
         Returns:
             체결된 주문 리스트
         """
-        if not self._active_orders:
-            return []
+        # 스냅샷 생성 (lock 밖에서 REST 호출용)
+        with self._order_lock:
+            if not self._active_orders:
+                return []
+            active_snapshot = list(self._active_orders.items())
 
-        # 브로커에서 당일 주문 조회
+        # broker REST API 호출 (lock 밖)
         broker_orders = self._broker.get_today_orders()
         broker_orders_dict = {o.order_id: o for o in broker_orders}
 
         filled_orders = []
 
-        for order_id, order in list(self._active_orders.items()):
-            # 추격매수/매도 fallback 진행 중인 주문은 스킵 (해당 메서드에서 직접 처리)
-            if order.is_chase_in_progress or order.is_sell_fallback_in_progress:
-                continue
+        # 결과 적용 (lock 안)
+        with self._order_lock:
+            for order_id, order in active_snapshot:
+                # WS fill에 의해 이미 제거되었을 수 있음
+                if order_id not in self._active_orders:
+                    continue
 
-            if order_id not in broker_orders_dict:
-                continue
+                # 추격매수/매도 fallback 진행 중인 주문은 스킵
+                if order.is_chase_in_progress or order.is_sell_fallback_in_progress:
+                    continue
 
-            broker_order = broker_orders_dict[order_id]
+                if order_id not in broker_orders_dict:
+                    continue
 
-            # 상태 업데이트
-            prev_filled = order.filled_qty
-            order.filled_qty = broker_order.filled_qty
-            order.filled_price = broker_order.filled_price
-            order.branch_no = broker_order.branch_no
-            order.updated_at = datetime.now()
+                broker_order = broker_orders_dict[order_id]
 
-            # 상태 판단
-            if broker_order.status == OrderStatus.FILLED:
-                order.state = OrderState.FILLED
-            elif broker_order.status == OrderStatus.PARTIAL:
-                order.state = OrderState.PARTIAL
-            elif broker_order.status == OrderStatus.CANCELLED:
-                order.state = OrderState.CANCELLED
+                # EC-8: overflow 방지
+                broker_filled = min(broker_order.filled_qty, order.quantity)
 
-            # 신규 체결분 처리
-            new_filled = order.filled_qty - prev_filled
-            if new_filled > 0:
-                self._handle_fill(order, new_filled)
+                # EC-5: WS가 이미 업데이트했을 수 있음 → 최신값과 비교
+                if broker_filled > order.filled_qty:
+                    prev_filled = order.filled_qty
+                    order.filled_qty = broker_filled  # 절대값 업데이트
+                    order.filled_price = broker_order.filled_price
+                    order.branch_no = broker_order.branch_no
+                    order.updated_at = datetime.now()
 
-            # 완료된 주문 정리
-            if order.is_complete:
-                self._active_orders.pop(order_id)
-                self._pending_stocks.discard(order.stock_code)
-                filled_orders.append(order)
+                    new_filled = broker_filled - prev_filled
+                    if new_filled > 0:
+                        if order.filled_qty >= order.quantity:
+                            order.state = OrderState.FILLED
+                        elif order.filled_qty > 0:
+                            order.state = OrderState.PARTIAL
+                        self._handle_fill(order, new_filled)
 
-                # DB 업데이트
-                self._update_order_in_db(order)
+                elif broker_order.status == OrderStatus.CANCELLED:
+                    order.state = OrderState.CANCELLED
+                    order.updated_at = datetime.now()
 
-                logger.info(
-                    f"Order completed: {order.stock_code} {order.side.value} "
-                    f"x {order.filled_qty} @ {order.filled_price}"
-                )
+                # 완료된 주문 정리
+                if order.is_complete:
+                    self._active_orders.pop(order_id, None)
+                    self._pending_stocks.discard(order.stock_code)
+                    self._update_order_in_db(order)
+                    filled_orders.append(order)
+
+                    logger.info(
+                        f"Order completed (REST): {order.stock_code} {order.side.value} "
+                        f"x{order.filled_qty} @ {order.filled_price}"
+                    )
 
         return filled_orders
 
@@ -1233,23 +1337,30 @@ class OrderManager:
 
     def cancel_order(self, order_id: str) -> bool:
         """단일 주문 취소"""
-        if order_id not in self._active_orders:
-            return False
+        with self._order_lock:
+            if order_id not in self._active_orders:
+                return False
+            order = self._active_orders[order_id]
+            remaining = order.remaining_qty
+            branch_no = order.branch_no
 
-        order = self._active_orders[order_id]
-
+        # broker REST 호출은 lock 밖
         success = self._broker.cancel_order(
             order_id=order_id,
-            order_branch=order.branch_no,
-            quantity=order.remaining_qty,
+            order_branch=branch_no,
+            quantity=remaining,
         )
 
         if success:
-            order.state = OrderState.CANCELLED
-            order.updated_at = datetime.now()
-            self._active_orders.pop(order_id)
-            self._pending_stocks.discard(order.stock_code)
-            self._update_order_in_db(order)
+            with self._order_lock:
+                # WS fill에 의해 이미 제거되었을 수 있음
+                if order_id in self._active_orders:
+                    order = self._active_orders[order_id]
+                    order.state = OrderState.CANCELLED
+                    order.updated_at = datetime.now()
+                    self._active_orders.pop(order_id)
+                    self._pending_stocks.discard(order.stock_code)
+                    self._update_order_in_db(order)
 
             # 감사 로그 기록 (취소)
             self._audit.log_order(
@@ -1259,7 +1370,7 @@ class OrderManager:
                 stock_name=order.stock_name,
                 order_id=order_id,
                 side=order.side.value,
-                quantity=order.remaining_qty,
+                quantity=remaining,
                 price=order.price,
                 strategy_name=order.strategy_name or "",
                 status="cancelled",
@@ -1278,42 +1389,46 @@ class OrderManager:
         cancelled = self._broker.cancel_all_pending_orders()
 
         # 내부 상태 정리 + 감사 로깅
-        for order in list(self._active_orders.values()):
-            order.state = OrderState.CANCELLED
-            order.updated_at = datetime.now()
-            self._update_order_in_db(order)
+        with self._order_lock:
+            for order in list(self._active_orders.values()):
+                order.state = OrderState.CANCELLED
+                order.updated_at = datetime.now()
+                self._update_order_in_db(order)
 
-            # 감사 로그 기록 (일괄 취소)
-            self._audit.log_order(
-                event_type="ORDER_CANCELLED",
-                module="OrderManager",
-                stock_code=order.stock_code,
-                stock_name=order.stock_name,
-                order_id=order.order_id,
-                side=order.side.value,
-                quantity=order.remaining_qty,
-                price=order.price,
-                strategy_name=order.strategy_name or "",
-                status="cancelled",
-                reason="cancel_all_pending",
-            )
+                # 감사 로그 기록 (일괄 취소)
+                self._audit.log_order(
+                    event_type="ORDER_CANCELLED",
+                    module="OrderManager",
+                    stock_code=order.stock_code,
+                    stock_name=order.stock_name,
+                    order_id=order.order_id,
+                    side=order.side.value,
+                    quantity=order.remaining_qty,
+                    price=order.price,
+                    strategy_name=order.strategy_name or "",
+                    status="cancelled",
+                    reason="cancel_all_pending",
+                )
 
-        self._active_orders.clear()
-        self._pending_stocks.clear()
+            self._active_orders.clear()
+            self._pending_stocks.clear()
 
         return cancelled
 
     def get_active_orders(self) -> List[ManagedOrder]:
         """활성 주문 조회"""
-        return list(self._active_orders.values())
+        with self._order_lock:
+            return list(self._active_orders.values())
 
     def get_order(self, order_id: str) -> Optional[ManagedOrder]:
         """주문 ID로 관리 주문 조회"""
-        return self._active_orders.get(order_id)
+        with self._order_lock:
+            return self._active_orders.get(order_id)
 
     def has_pending_order(self, stock_code: str) -> bool:
         """종목에 진행 중인 주문이 있는지 확인"""
-        return stock_code in self._pending_stocks
+        with self._order_lock:
+            return stock_code in self._pending_stocks
 
     def get_today_trade_count(self, stock_code: str) -> int:
         """당일 해당 종목의 거래 횟수 조회"""

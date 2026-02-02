@@ -389,13 +389,23 @@ class BaseStrategy(ABC):
         signal: TradingSignal,
         filled_price: int,
         filled_qty: int,
-    ) -> None:
+    ) -> Optional[TradingSignal]:
         """
         체결 시 콜백 (선택적 오버라이드)
 
-        주문 체결 확인 후 호출됨
+        주문 체결 확인 후 호출됨.
+        후속 매매 시그널을 반환하면 다음 scheduler tick에서 처리됨.
+
+        Args:
+            context: 최소 컨텍스트 (position 정보 포함, price_history 없을 수 있음)
+            signal: 체결된 주문의 원래 시그널 정보
+            filled_price: 체결 단가
+            filled_qty: 체결 수량
+
+        Returns:
+            Optional[TradingSignal]: 후속 매매 시그널 또는 None
         """
-        pass
+        return None
 
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}(name='{self._name}', params={self._params})"

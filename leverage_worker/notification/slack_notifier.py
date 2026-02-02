@@ -10,6 +10,7 @@ Slack 알림 전송 (두 가지 방식 지원)
 """
 
 import json
+import threading
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -52,6 +53,9 @@ class SlackNotifier:
         self._signal_first_sent: Set[Tuple[str, str]] = set()  # 첫 알림 전송된 pair
         self._signal_stock_names: Dict[str, str] = {}  # stock_code -> stock_name 매핑
         self._sell_first_sent: Set[Tuple[str, str]] = set()  # 매도 알림 중복 방지
+
+        # 시그널 상태 보호용 lock (RLock: send_signal_summary → reset_signal_history 중첩)
+        self._signal_lock = threading.RLock()
 
         # 우선순위: token+channel > webhook_url
         self._use_token = token is not None and channel is not None
@@ -193,22 +197,22 @@ class SlackNotifier:
         """매도 주문 접수 알림"""
         # 중복 방지: 동일 종목-전략 pair에 대해 첫 매도 알림만 전송
         key = (stock_code, strategy_name)
-        if key in self._sell_first_sent:
-            logger.debug(f"Sell skipped (already sent): {stock_name} {strategy_name}")
-            return True
-        self._sell_first_sent.add(key)
+        with self._signal_lock:
+            if key in self._sell_first_sent:
+                logger.debug(f"Sell skipped (already sent): {stock_name} {strategy_name}")
+                return True
+            self._sell_first_sent.add(key)
 
+        # HTTP 호출은 lock 밖
         total_amount = quantity * price
         sign = "+" if profit_loss >= 0 else ""
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # 수익/손실 아이콘 결정
         if profit_rate >= 0:
-            profit_icon = "📈"
+            profit_icon = "\U0001f4c8"
         else:
-            profit_icon = "📉"
+            profit_icon = "\U0001f4c9"
 
-        # 전략명에 승률 포함
         strategy_display = strategy_name
         if strategy_win_rate is not None:
             strategy_display = f"{strategy_name}({strategy_win_rate:.1f}%)"
@@ -247,27 +251,26 @@ class SlackNotifier:
         """
         key = (stock_code, strategy_name)
 
-        # 카운트 증가 및 종목명 저장
-        self._signal_count[key] = self._signal_count.get(key, 0) + 1
-        self._signal_stock_names[stock_code] = stock_name
+        # 상태 변경 구간 lock
+        with self._signal_lock:
+            self._signal_count[key] = self._signal_count.get(key, 0) + 1
+            self._signal_stock_names[stock_code] = stock_name
 
-        # 첫 시그널이 아니면 전송하지 않고 성공 반환 (force=True면 무시)
-        if key in self._signal_first_sent and not force:
-            logger.debug(
-                f"Signal skipped (already sent): {stock_name} {strategy_name} "
-                f"(count: {self._signal_count[key]})"
-            )
-            return True
+            if key in self._signal_first_sent and not force:
+                logger.debug(
+                    f"Signal skipped (already sent): {stock_name} {strategy_name} "
+                    f"(count: {self._signal_count[key]})"
+                )
+                return True
 
-        # 첫 시그널 전송 표시
-        self._signal_first_sent.add(key)
+            self._signal_first_sent.add(key)
 
+        # HTTP 호출은 lock 밖
         is_buy = signal_type.upper() == "BUY"
         signal_text = "매수시그널" if is_buy else "매도시그널"
         total_amount = quantity * price
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # 전략명에 승률 포함
         strategy_display = strategy_name
         if strategy_win_rate is not None:
             strategy_display = f"{strategy_name}({strategy_win_rate:.1f}%)"
@@ -277,7 +280,6 @@ class SlackNotifier:
             f"전략: {strategy_display}" + (f" / {reason}" if reason else ""),
         ]
 
-        # 매수 시그널인 경우 TP/SL 정보 추가
         if is_buy and tp_price is not None and sl_price is not None:
             tp_rate_str = f"{tp_rate:.1%}" if tp_rate is not None else ""
             sl_rate_str = f"{sl_rate:.1%}" if sl_rate is not None else ""
@@ -515,19 +517,21 @@ class SlackNotifier:
 
     def reset_signal_history(self) -> None:
         """시그널 기록 초기화 (다음 날 준비)"""
-        self._signal_count.clear()
-        self._signal_first_sent.clear()
-        self._signal_stock_names.clear()
+        with self._signal_lock:
+            self._signal_count.clear()
+            self._signal_first_sent.clear()
+            self._signal_stock_names.clear()
         logger.debug("Signal history reset")
 
     def reset_signal_for_key(self, stock_code: str, strategy_name: str) -> None:
         """특정 종목-전략의 시그널 기록 초기화 (체결 완료 시 호출)"""
         key = (stock_code, strategy_name)
-        if key in self._signal_first_sent:
-            self._signal_first_sent.discard(key)
-        if key in self._signal_count:
-            del self._signal_count[key]
-        self._sell_first_sent.discard(key)  # 매도 알림 중복 방지 초기화
+        with self._signal_lock:
+            if key in self._signal_first_sent:
+                self._signal_first_sent.discard(key)
+            if key in self._signal_count:
+                del self._signal_count[key]
+            self._sell_first_sent.discard(key)  # 매도 알림 중복 방지 초기화
         logger.debug(f"Signal history reset for {stock_code}/{strategy_name}")
 
     def send_signal_summary(self) -> bool:
@@ -540,23 +544,25 @@ class SlackNotifier:
         Returns:
             성공 여부 (시그널이 없거나 추가 시그널이 없으면 True)
         """
-        if not self._signal_count:
-            logger.debug("No signals to summarize")
-            return True
+        with self._signal_lock:
+            if not self._signal_count:
+                logger.debug("No signals to summarize")
+                return True
 
-        # 2회 이상 발생한 시그널만 필터링 (첫 번째는 이미 전송됨)
-        summary_items = []
-        for (stock_code, strategy), count in sorted(self._signal_count.items()):
-            if count > 1:
-                stock_name = self._signal_stock_names.get(stock_code, stock_code)
-                summary_items.append(f"{strategy}: {count}회 ({stock_name})")
+            # 2회 이상 발생한 시그널만 필터링 (첫 번째는 이미 전송됨)
+            summary_items = []
+            for (stock_code, strategy), count in sorted(self._signal_count.items()):
+                if count > 1:
+                    stock_name = self._signal_stock_names.get(stock_code, stock_code)
+                    summary_items.append(f"{strategy}: {count}회 ({stock_name})")
 
-        # 추가 시그널이 없으면 전송하지 않음
-        if not summary_items:
-            logger.debug("No additional signals to summarize (all first-time only)")
-            self.reset_signal_history()
-            return True
+            # 추가 시그널이 없으면 전송하지 않음
+            if not summary_items:
+                logger.debug("No additional signals to summarize (all first-time only)")
+                self.reset_signal_history()
+                return True
 
+        # HTTP 호출은 lock 밖
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         lines = [f"{self._get_mode_prefix()}[시그널요약]"]
         lines.extend(summary_items)

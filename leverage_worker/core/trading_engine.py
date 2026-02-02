@@ -11,6 +11,7 @@ import signal
 import sys
 import threading
 import uuid
+from collections import deque
 from datetime import datetime
 from typing import Dict, List, Optional, Set
 
@@ -46,7 +47,7 @@ from leverage_worker.utils.math_utils import calculate_allocation_amount
 from leverage_worker.utils.structured_logger import get_structured_logger
 from leverage_worker.scalping.executor import ScalpingExecutor
 from leverage_worker.scalping.models import ScalpingConfig
-from leverage_worker.websocket import ExitMonitor, ExitMonitorConfig, RealtimeWSClient, TickData
+from leverage_worker.websocket import ExitMonitor, ExitMonitorConfig, OrderNoticeData, RealtimeWSClient, TickData
 
 logger = get_logger(__name__)
 structured_logger = get_structured_logger()
@@ -143,6 +144,9 @@ class TradingEngine:
 
         # 16. 동시성 제어 (스케줄러/WebSocket 공유 리소스 보호)
         self._tick_lock = threading.Lock()
+        self._check_fills_lock = threading.Lock()
+        self._pnl_lock = threading.Lock()
+        self._pending_fill_signals: deque = deque()  # thread-safe FIFO
 
         # 17. Daily Liquidation Manager
         self._liquidation_manager: Optional["DailyLiquidationManager"] = None
@@ -659,10 +663,23 @@ class TradingEngine:
 
     def _on_check_fills(self) -> None:
         """체결 확인 콜백 (병렬 틱 처리 전 1회 호출)"""
+        # 1. 큐에 쌓인 fill signal 처리 (WS on_fill 콜백에서 발생)
+        self._process_pending_fill_signals()
+
+        # 2. WebSocket 체결통보가 활성이면 REST 폴링 불필요
+        if self._ws_client and self._ws_client.is_order_notice_active:
+            return
+
+        # 3. REST 폴백 (WS 비정상 시)
+        if not self._check_fills_lock.acquire(blocking=False):
+            logger.debug("check_fills already running, skipping")
+            return
         try:
             self._order_manager.check_fills()
         except Exception as e:
             logger.error(f"Check fills error: {e}")
+        finally:
+            self._check_fills_lock.release()
 
     def _on_order_fill(
         self, order: ManagedOrder, filled_qty: int, avg_price: float = 0.0
@@ -688,7 +705,8 @@ class TradingEngine:
                     )
 
                 # 당일 누적 실현손익 업데이트
-                self._daily_realized_pnl += profit_loss
+                with self._pnl_lock:
+                    self._daily_realized_pnl += profit_loss
 
                 # 매도 체결 시 ExitMonitor 해제
                 self._unregister_position_from_exit_monitor(order.stock_code)
@@ -704,6 +722,10 @@ class TradingEngine:
                     order.stock_code, order.strategy_name
                 )
 
+            # PnL 읽기 시 lock
+            with self._pnl_lock:
+                daily_pnl = self._daily_realized_pnl if order.side == OrderSide.SELL else None
+
             self._slack.notify_fill(
                 fill_type=order.side.value,
                 stock_code=order.stock_code,
@@ -714,17 +736,73 @@ class TradingEngine:
                 profit_loss=profit_loss,
                 profit_rate=profit_rate,
                 strategy_win_rate=win_rate,
-                daily_cumulative_pnl=self._daily_realized_pnl if order.side == OrderSide.SELL else None,
+                daily_cumulative_pnl=daily_pnl,
                 total_filled=order.filled_qty,
-                order_quantity=order.original_quantity or order.quantity,  # 원래 목표 수량 사용
+                order_quantity=order.original_quantity or order.quantity,
             )
 
             # 체결 완료 시 시그널 기록 리셋 (다음 시그널도 알림 받기 위함)
             if order.strategy_name:
                 self._slack.reset_signal_for_key(order.stock_code, order.strategy_name)
 
+            # 전략 on_fill 콜백 → 후속 시그널 큐잉
+            self._notify_strategy_fill(order, filled_qty, avg_price)
+
         except Exception as e:
             logger.error(f"Order fill notification error: {e}")
+
+    def _notify_strategy_fill(
+        self, order: ManagedOrder, filled_qty: int, avg_price: float
+    ) -> None:
+        """전략에 체결 통보 → 후속 시그널 큐잉"""
+        if not order.strategy_name:
+            return
+        strategy_key = (order.stock_code, order.strategy_name)
+        strategy = self._strategies.get(strategy_key)
+        if not strategy:
+            return
+        try:
+            # 최소 컨텍스트 생성
+            position = self._position_manager.get_position(order.stock_code)
+            context = StrategyContext(
+                stock_code=order.stock_code,
+                stock_name=order.stock_name,
+                current_price=order.filled_price,
+                current_time=datetime.now(),
+                price_history=[],  # 체결 시점에는 미제공
+                position=position,
+            )
+            signal_info = TradingSignal(
+                signal_type=order.side.value,
+                stock_code=order.stock_code,
+                quantity=filled_qty,
+                reason=f"fill_callback:{order.order_id}",
+            )
+            result = strategy.on_fill(context, signal_info, order.filled_price, filled_qty)
+            if result and not result.is_hold:
+                # EC-6: WS 스레드에서 직접 주문하면 블로킹 → 큐에 저장
+                self._pending_fill_signals.append((result, context, strategy))
+                logger.info(
+                    f"[on_fill] {order.stock_code} 후속 시그널 큐잉: "
+                    f"{result.signal_type} x{result.quantity}"
+                )
+        except Exception as e:
+            logger.error(f"Strategy on_fill error: {e}")
+
+    def _process_pending_fill_signals(self) -> None:
+        """큐에 쌓인 fill 후속 시그널 처리 (scheduler 스레드에서 호출)"""
+        while self._pending_fill_signals:
+            try:
+                signal_data, context, strategy = self._pending_fill_signals.popleft()
+                logger.info(
+                    f"[on_fill 후속] {signal_data.stock_code} "
+                    f"{signal_data.signal_type} x{signal_data.quantity} 처리"
+                )
+                self._process_signal(signal_data, context, strategy)
+            except IndexError:
+                break
+            except Exception as e:
+                logger.error(f"Pending fill signal processing error: {e}")
 
     # ===== WebSocket 관련 메서드 =====
 
@@ -739,7 +817,9 @@ class TradingEngine:
         self._ws_client = RealtimeWSClient(
             on_tick=self._on_ws_tick,
             on_error=self._on_ws_error,
+            on_order_notice=self._on_ws_order_notice,
             is_paper=self._settings.mode == TradingMode.PAPER,
+            hts_id=self._settings.hts_id,
         )
         self._ws_client.start(list(ws_stock_codes))
         logger.info(f"WebSocket started for {len(ws_stock_codes)} stocks: {ws_stock_codes}")
@@ -759,6 +839,21 @@ class TradingEngine:
         """WebSocket 에러 콜백"""
         logger.error(f"WebSocket error: {error}")
         self._slack.notify_error("WebSocket 에러", str(error))
+
+    def _on_ws_order_notice(self, notice: OrderNoticeData) -> None:
+        """WebSocket 체결통보 수신 콜백 - OrderManager.process_ws_fill() 직접 호출"""
+        try:
+            logger.info(
+                f"[WS 체결통보] {notice.stock_code} "
+                f"주문번호={notice.order_no} 체결수량={notice.filled_qty}"
+            )
+            self._order_manager.process_ws_fill(
+                order_no=notice.order_no,
+                filled_qty=notice.filled_qty,
+                filled_price=notice.filled_price,
+            )
+        except Exception as e:
+            logger.error(f"Order notice handling error: {e}")
 
     # ===== 실시간 매도 모니터링 (ExitMonitor) =====
 
