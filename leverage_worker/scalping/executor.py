@@ -16,15 +16,10 @@ from leverage_worker.utils.logger import get_logger
 logger = get_logger("scalping.executor")
 
 
-# KRX 호가 단위 테이블 (코스피 ETF 기준)
+# KRX 호가 단위 테이블 (ETF 기준: 2,000원 미만 1원, 이상 5원)
 _TICK_SIZE_TABLE = [
     (2_000, 1),
-    (5_000, 5),
-    (20_000, 10),
-    (50_000, 50),
-    (200_000, 100),
-    (500_000, 500),
-    (float("inf"), 1_000),
+    (float("inf"), 5),
 ]
 
 
