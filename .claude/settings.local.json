@@ -31,7 +31,9 @@
       "Bash(\".conda/python.exe\":*)",
       "Bash(c:/Users/suble/.conda/envs/leverage-worker/python.exe:*)",
       "Bash(/c/Users/suble/.conda/envs/leverage-worker/python.exe:*)",
-      "Bash(wc:*)"
+      "Bash(wc:*)",
+      "Bash(del \"c:\\\\Users\\\\suble\\\\Desktop\\\\work\\\\project\\\\leverage-worker\\\\leverage_worker\\\\config\\\\credentials\\\\kis_paper.yaml\")",
+      "Bash(del \"c:\\\\Users\\\\suble\\\\Desktop\\\\work\\\\project\\\\leverage-worker\\\\leverage_worker\\\\config\\\\credentials\\\\kis_prod.yaml\")"
     ],
     "deny": [],
     "ask": []

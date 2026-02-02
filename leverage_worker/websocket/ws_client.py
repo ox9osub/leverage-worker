@@ -23,7 +23,8 @@ logger = get_logger(__name__)
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "examples_user"))
 
 import kis_auth as ka
-from domestic_stock.domestic_stock_functions_ws import ccnl_krx
+from domestic_stock.domestic_stock_functions_ws import ccnl_krx, ccnl_notice
+from leverage_worker.websocket.order_notice_handler import OrderNoticeData, OrderNoticeHandler
 
 
 class RealtimeWSClient:
@@ -38,15 +39,25 @@ class RealtimeWSClient:
         self,
         on_tick: Callable[[TickData], None],
         on_error: Optional[Callable[[Exception], None]] = None,
+        on_order_notice: Optional[Callable[[OrderNoticeData], None]] = None,
+        is_paper: bool = True,
+        hts_id: str = "",
     ):
         """
         Args:
             on_tick: 체결 데이터 수신 시 호출할 콜백
             on_error: 에러 발생 시 호출할 콜백
+            on_order_notice: 체결통보 수신 시 호출할 콜백
+            is_paper: 모의투자 여부 (True면 모의투자 WebSocket 사용)
+            hts_id: HTS ID (체결통보 구독용)
         """
         self._on_tick = on_tick
         self._on_error = on_error
+        self._on_order_notice = on_order_notice
+        self._is_paper = is_paper
+        self._hts_id = hts_id
         self._tick_handler = TickHandler()
+        self._order_notice_handler = OrderNoticeHandler()
 
         self._ws_thread: Optional[threading.Thread] = None
         self._ws: Optional[websockets.ClientConnection] = None
@@ -109,9 +120,10 @@ class RealtimeWSClient:
     def _run_websocket(self) -> None:
         """WebSocket 실행 (별도 스레드에서 호출)"""
         try:
-            # WebSocket 인증
-            ka.auth_ws()
-            logger.info("WebSocket authenticated")
+            # WebSocket 인증 (모드에 맞는 키 사용)
+            ws_svr = "vps" if self._is_paper else "prod"
+            ka.auth_ws(svr=ws_svr)
+            logger.info(f"WebSocket authenticated (svr={ws_svr})")
 
             # WebSocket 객체 생성 및 인스턴스 변수 저장
             self._kws = ka.KISWebSocket(api_url="/tryitout", max_retries=10)

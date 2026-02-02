@@ -674,31 +674,29 @@ class KISBroker:
         """
         주문의 체결/미체결 수량 조회
 
+        stock_code + side가 전달되면 get_balance 기반으로 체결 확인 (PRIMARY).
+        전달되지 않으면 _get_orders 사용 (레거시 호환).
+
         Args:
             order_id: 주문번호
-            stock_code: 종목코드 (fallback용)
-            order_qty: 주문수량 (fallback용)
-            side: 매수/매도 구분 (fallback용)
+            stock_code: 종목코드
+            order_qty: 주문수량
+            side: 매수/매도 구분
 
         Returns:
             (체결수량, 미체결수량) 튜플
         """
-        # 1차: _get_orders로 정확한 체결 조회
-        orders = self._get_orders(all_orders=True)
+        # stock_code + side가 있으면 get_balance 기반 (모의투자 호환)
+        if stock_code and side:
+            return self._get_order_status_from_balance(stock_code, order_qty, side)
 
+        # 레거시: _get_orders 사용
+        orders = self._get_orders(all_orders=True)
         for order in orders:
             if order.order_id == order_id:
                 unfilled_qty = order.order_qty - order.filled_qty
                 return (order.filled_qty, unfilled_qty)
 
-        # orders가 비어있으면 API 실패 → balance fallback
-        if not orders and stock_code and side:
-            logger.info(
-                f"_get_orders failed, using balance fallback for order {order_id}"
-            )
-            return self._get_order_status_from_balance(stock_code, order_qty, side)
-
-        # 주문을 찾지 못한 경우 (전량 체결 등)
         logger.warning(f"Order not found: {order_id}")
         return (0, 0)
 
@@ -912,8 +910,28 @@ class KISBroker:
         self._session.smart_sleep()
 
         if not res.is_ok():
-            res.print_error(api_url)
-            return 0, 0
+            # 인증/계좌 에러 시 토큰 재발급 후 1회 재시도
+            if self._is_auth_error(res):
+                logger.warning(
+                    "get_buyable_quantity auth error detected. "
+                    "Attempting token refresh and retry..."
+                )
+                if self._session.force_reauthenticate():
+                    res = self._session.url_fetch(api_url, tr_id, params=params)
+                    self._session.smart_sleep()
+                    if not res.is_ok():
+                        logger.error(
+                            f"get_buyable_quantity still failed after token refresh: "
+                            f"{res.get_error_code()} {res.get_error_message()}"
+                        )
+                        return 0, 0
+                    logger.info("get_buyable_quantity succeeded after token refresh")
+                else:
+                    logger.error("Token re-authentication failed")
+                    return 0, 0
+            else:
+                res.print_error(api_url)
+                return 0, 0
 
         try:
             body = res.get_body()
@@ -925,37 +943,11 @@ class KISBroker:
                     return int(output.get(key, default) or default)
                 return int(getattr(output, key, default) or default)
 
-            # API 응답 필드 추출 (모든 금액/수량 관련 필드)
             ord_psbl_cash = get_value("ord_psbl_cash")  # 주문가능현금
-            ord_psbl_sbst = get_value("ord_psbl_sbst")  # 주문가능대용
-            ruse_psbl_amt = get_value("ruse_psbl_amt")  # 재사용가능금액
-            fund_rpch_chgs = get_value("fund_rpch_chgs")  # 펀드환매대금
             psbl_qty_calc_unpr = get_value("psbl_qty_calc_unpr")  # 가능수량계산단가
-            nrcvb_buy_amt = get_value("nrcvb_buy_amt")  # 미수없는매수금액
             nrcvb_buy_qty = get_value("nrcvb_buy_qty")  # 미수없는매수수량
-            max_buy_amt = get_value("max_buy_amt")  # 최대매수금액
-            max_buy_qty = get_value("max_buy_qty")  # 최대매수수량
-            cma_evlu_amt = get_value("cma_evlu_amt")  # CMA평가금액
-            ovrs_re_use_amt_wcrc = get_value("ovrs_re_use_amt_wcrc")  # 해외재사용금액원화
-            ord_psbl_frcr_amt_wcrc = get_value("ord_psbl_frcr_amt_wcrc")  # 주문가능외화금액원화
-
-            # 디버깅 로그 - 모든 금액/수량 정보 출력
-            logger.info(f"[{stock_code}] 매수가능조회 응답:")
-            logger.info(f"  - ord_psbl_cash (주문가능현금): {ord_psbl_cash:,}원")
-            logger.info(f"  - ord_psbl_sbst (주문가능대용): {ord_psbl_sbst:,}원")
-            logger.info(f"  - ruse_psbl_amt (재사용가능금액): {ruse_psbl_amt:,}원")
-            logger.info(f"  - fund_rpch_chgs (펀드환매대금): {fund_rpch_chgs:,}원")
-            logger.info(f"  - psbl_qty_calc_unpr (가능수량계산단가): {psbl_qty_calc_unpr:,}원")
-            logger.info(f"  - nrcvb_buy_amt (미수없는매수금액): {nrcvb_buy_amt:,}원")
-            logger.info(f"  - nrcvb_buy_qty (미수없는매수수량): {nrcvb_buy_qty:,}주")
-            logger.info(f"  - max_buy_amt (최대매수금액): {max_buy_amt:,}원")
-            logger.info(f"  - max_buy_qty (최대매수수량): {max_buy_qty:,}주")
-            logger.info(f"  - cma_evlu_amt (CMA평가금액): {cma_evlu_amt:,}원")
-            logger.info(f"  - ovrs_re_use_amt_wcrc (해외재사용금액): {ovrs_re_use_amt_wcrc:,}원")
-            logger.info(f"  - ord_psbl_frcr_amt_wcrc (주문가능외화금액): {ord_psbl_frcr_amt_wcrc:,}원")
 
             # 주문가능현금을 현재가로 나누어 계산 (MTS 현금매수가능과 동일)
-            # current_price가 전달되면 현재가 사용, 아니면 API의 계산단가 사용
             calc_price = current_price if current_price > 0 else psbl_qty_calc_unpr
 
             if calc_price > 0:

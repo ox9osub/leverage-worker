@@ -5,6 +5,7 @@ Settings 모듈 테스트
 import pytest
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
@@ -17,19 +18,26 @@ class TestSettingsLoad:
         self.temp_dir = tempfile.mkdtemp()
         self.config_path = Path(self.temp_dir)
 
-        # credentials 폴더 생성
-        (self.config_path / "credentials").mkdir(parents=True, exist_ok=True)
+        # ~/KIS/config/ 디렉토리 생성 (kis_devlp.yaml용)
+        kis_config_dir = self.config_path / "KIS" / "config"
+        kis_config_dir.mkdir(parents=True, exist_ok=True)
 
-        # kis_paper.yaml 생성
-        paper_creds = {
-            "app_key": "TEST_APP_KEY",
-            "app_secret": "TEST_APP_SECRET",
-            "account_number": "12345678",
-            "account_product_code": "01",
-            "hts_id": "TEST_HTS_ID",
+        # kis_devlp.yaml 통합 설정 파일 생성
+        devlp_creds = {
+            # 모의투자
+            "paper_app": "TEST_APP_KEY",
+            "paper_sec": "TEST_APP_SECRET",
+            "my_paper_stock": "12345678",
+            # 실전투자
+            "my_app": "LIVE_KEY",
+            "my_sec": "LIVE_SECRET",
+            "my_acct_stock": "87654321",
+            # 공통
+            "my_prod": "01",
+            "my_htsid": "TEST_HTS_ID",
         }
-        with open(self.config_path / "credentials" / "kis_paper.yaml", "w") as f:
-            yaml.dump(paper_creds, f)
+        with open(kis_config_dir / "kis_devlp.yaml", "w") as f:
+            yaml.dump(devlp_creds, f)
 
         # trading_config.yaml 생성
         trading_config = {
@@ -65,8 +73,10 @@ class TestSettingsLoad:
         with open(self.config_path / "trading_config.yaml", "w") as f:
             yaml.dump(trading_config, f)
 
-    def test_settings_load_success(self):
+    @patch("pathlib.Path.home")
+    def test_settings_load_success(self, mock_home):
         """설정 로드 성공 테스트"""
+        mock_home.return_value = self.config_path
         from leverage_worker.config.settings import Settings, TradingMode
 
         settings = Settings(mode=TradingMode.PAPER, config_path=self.config_path)
@@ -76,8 +86,10 @@ class TestSettingsLoad:
         assert settings.schedule.trading_start == "09:00"
         assert len(settings.stocks) == 2
 
-    def test_stock_config_access(self):
+    @patch("pathlib.Path.home")
+    def test_stock_config_access(self, mock_home):
         """StockConfig 속성 접근 테스트"""
+        mock_home.return_value = self.config_path
         from leverage_worker.config.settings import Settings, TradingMode
 
         settings = Settings(mode=TradingMode.PAPER, config_path=self.config_path)
@@ -89,8 +101,10 @@ class TestSettingsLoad:
         assert len(samsung.strategies) == 1
         assert samsung.strategies[0]["name"] == "example_strategy"
 
-    def test_get_stock_interval(self):
+    @patch("pathlib.Path.home")
+    def test_get_stock_interval(self, mock_home):
         """종목별 interval 조회 테스트"""
+        mock_home.return_value = self.config_path
         from leverage_worker.config.settings import Settings, TradingMode
 
         settings = Settings(mode=TradingMode.PAPER, config_path=self.config_path)
@@ -101,24 +115,19 @@ class TestSettingsLoad:
         # 개별 설정이 없는 종목 (기본값 사용)
         assert settings.get_stock_interval("000660") == 5
 
-    def test_server_url(self):
+    @patch("pathlib.Path.home")
+    def test_server_url(self, mock_home):
         """서버 URL 테스트"""
+        mock_home.return_value = self.config_path
         from leverage_worker.config.settings import Settings, TradingMode
 
         paper_settings = Settings(mode=TradingMode.PAPER, config_path=self.config_path)
         assert "vts" in paper_settings.get_server_url()
 
-        # live용 설정 파일 생성
-        with open(self.config_path / "credentials" / "kis_prod.yaml", "w") as f:
-            yaml.dump({
-                "app_key": "LIVE_KEY",
-                "app_secret": "LIVE_SECRET",
-                "account_number": "87654321",
-                "account_product_code": "01",
-            }, f)
-
         live_settings = Settings(mode=TradingMode.LIVE, config_path=self.config_path)
         assert "vts" not in live_settings.get_server_url()
+        assert live_settings.app_key == "LIVE_KEY"
+        assert live_settings.account_number == "87654321"
 
 
 class TestTimeUtils:

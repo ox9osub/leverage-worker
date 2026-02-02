@@ -739,6 +739,7 @@ class TradingEngine:
         self._ws_client = RealtimeWSClient(
             on_tick=self._on_ws_tick,
             on_error=self._on_ws_error,
+            is_paper=self._settings.mode == TradingMode.PAPER,
         )
         self._ws_client.start(list(ws_stock_codes))
         logger.info(f"WebSocket started for {len(ws_stock_codes)} stocks: {ws_stock_codes}")
@@ -765,6 +766,7 @@ class TradingEngine:
         """실시간 매도 모니터링 시작"""
         self._exit_monitor = ExitMonitor(
             on_exit_signal=self._on_exit_monitor_signal,
+            is_paper=self._settings.mode == TradingMode.PAPER,
         )
         self._exit_monitor.start()
 

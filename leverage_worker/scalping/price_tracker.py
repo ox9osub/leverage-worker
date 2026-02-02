@@ -125,6 +125,35 @@ class PriceRangeTracker:
             return self.get_adaptive_window()
         return self._window_seconds
 
+    def get_uptick_ratio(
+        self, window_seconds: Optional[int] = None
+    ) -> Optional[float]:
+        """
+        윈도우 내 상승틱 비율 반환.
+
+        연속된 틱 쌍에서 가격이 올라간 비율 계산.
+        예: 틱 [100, 99, 100, 101, 100] → 변화: [-1, +1, +1, -1] → 상승 2/4 = 0.5
+
+        Returns:
+            0.0~1.0 사이 비율. 데이터 부족 시 None.
+        """
+        prices = self._get_prices(window_seconds)
+        if len(prices) < 4:
+            return None
+
+        up_count = 0
+        total_changes = 0
+        for i in range(1, len(prices)):
+            if prices[i] != prices[i - 1]:
+                total_changes += 1
+                if prices[i] > prices[i - 1]:
+                    up_count += 1
+
+        if total_changes == 0:
+            return 0.5  # 가격 변화 없음 → 중립
+
+        return up_count / total_changes
+
     def reset(self) -> None:
         """전체 데이터 초기화"""
         with self._lock:

@@ -60,13 +60,16 @@ class ExitMonitor:
     def __init__(
         self,
         on_exit_signal: Callable[[str, str, int, str, bool], None],
+        is_paper: bool = True,
     ):
         """
         Args:
             on_exit_signal: 매도 시그널 콜백
                 (stock_code, strategy_name, quantity, reason, is_take_profit)
+            is_paper: 모의투자 여부 (True면 모의투자 WebSocket 사용)
         """
         self._on_exit_signal = on_exit_signal
+        self._is_paper = is_paper
         self._tick_handler = TickHandler()
 
         # 모니터링 상태
@@ -272,9 +275,10 @@ class ExitMonitor:
     def _run_websocket(self, initial_stocks: List[str]) -> None:
         """WebSocket 실행 (별도 스레드)"""
         try:
-            # WebSocket 인증
-            ka.auth_ws()
-            logger.info("[ExitMonitor] WebSocket authenticated")
+            # WebSocket 인증 (모드에 맞는 키 사용)
+            ws_svr = "vps" if self._is_paper else "prod"
+            ka.auth_ws(svr=ws_svr)
+            logger.info(f"[ExitMonitor] WebSocket authenticated (svr={ws_svr})")
 
             # WebSocket 객체 생성
             self._kws = ka.KISWebSocket(api_url="/tryitout", max_retries=10)

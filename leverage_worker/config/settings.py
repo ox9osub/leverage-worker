@@ -105,15 +105,31 @@ class Settings:
         self._load_trading_config(config_path)
 
     def _load_credentials(self, config_path: Path) -> None:
-        """API 자격증명 로드"""
-        credential_file = "kis_prod.yaml" if self.mode == TradingMode.LIVE else "kis_paper.yaml"
-        credential_path = config_path / "credentials" / credential_file
+        """API 자격증명 로드 (~/KIS/config/kis_devlp.yaml 단일 파일)"""
+        devlp_path = Path.home() / "KIS" / "config" / "kis_devlp.yaml"
 
-        if not credential_path.exists():
-            raise FileNotFoundError(f"Credential file not found: {credential_path}")
+        if not devlp_path.exists():
+            raise FileNotFoundError(f"Credential file not found: {devlp_path}")
 
-        with open(credential_path, encoding="utf-8") as f:
-            self._credentials = yaml.safe_load(f) or {}
+        with open(devlp_path, encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+
+        if self.mode == TradingMode.PAPER:
+            self._credentials = {
+                "app_key": cfg.get("paper_app", ""),
+                "app_secret": cfg.get("paper_sec", ""),
+                "account_number": cfg.get("my_paper_stock", ""),
+                "account_product_code": cfg.get("my_prod", "01"),
+                "hts_id": cfg.get("my_htsid", ""),
+            }
+        else:
+            self._credentials = {
+                "app_key": cfg.get("my_app", ""),
+                "app_secret": cfg.get("my_sec", ""),
+                "account_number": cfg.get("my_acct_stock", ""),
+                "account_product_code": cfg.get("my_prod", "01"),
+                "hts_id": cfg.get("my_htsid", ""),
+            }
 
     def _load_trading_config(self, config_path: Path) -> None:
         """종목별 전략 설정 로드"""

@@ -94,6 +94,10 @@ class ScalpingExecutor:
         # 쿨다운
         self._cooldown_start: Optional[datetime] = None
 
+        # 체결 확인 스로틀링 (API 호출 제한)
+        self._last_order_check_time: Optional[datetime] = None
+        self._order_check_interval: float = 3.0  # 초 단위 (3초마다 balance 확인)
+
         # 스레드 안전
         self._lock = threading.Lock()
 
@@ -212,6 +216,17 @@ class ScalpingExecutor:
         # 호가 단위 맞춤 (매수: 내림)
         buy_price = round_to_tick_size(p10, direction="down")
 
+        # 추세 필터: 하락추세일 때 매수 보류
+        if self._config.trend_filter_enabled:
+            uptick_ratio = self._price_tracker.get_uptick_ratio(
+                window_seconds=window
+            )
+            if (
+                uptick_ratio is not None
+                and uptick_ratio < self._config.min_uptick_ratio
+            ):
+                return
+
         # 매수 조건: P10이 시그널 가격 이하
         if buy_price > self._signal_ctx.signal_price:
             return
@@ -257,6 +272,7 @@ class ScalpingExecutor:
             self._buy_order_price = buy_price
             self._buy_order_qty = quantity
             self._buy_order_time = timestamp
+            self._last_order_check_time = None  # 첫 체결 확인 즉시 실행
             self._transition(ScalpingState.BUY_PENDING)
             logger.info(
                 f"[scalping][{self._stock_name}] 매수 주문: "
@@ -273,7 +289,23 @@ class ScalpingExecutor:
             self._transition(ScalpingState.MONITORING)
             return
 
-        # 체결 상태 조회
+        # 체결 확인 스로틀링 (N초마다 한 번만 API 호출)
+        if self._last_order_check_time:
+            elapsed = (timestamp - self._last_order_check_time).total_seconds()
+            if elapsed < self._order_check_interval:
+                # 스로틀링 중이라도 타임아웃은 확인
+                if self._buy_order_time:
+                    total_elapsed = (timestamp - self._buy_order_time).total_seconds()
+                    if total_elapsed >= self._config.buy_timeout_seconds:
+                        logger.info(
+                            f"[scalping][{self._stock_name}] 매수 타임아웃 "
+                            f"({total_elapsed:.0f}초) → 취소 후 재시도"
+                        )
+                        self._cancel_buy_and_return_to_monitoring()
+                return
+        self._last_order_check_time = timestamp
+
+        # 체결 상태 조회 (get_balance API 호출)
         filled_qty, unfilled_qty = self._broker.get_order_status(
             self._buy_order_id,
             stock_code=self._stock_code,
@@ -373,7 +405,23 @@ class ScalpingExecutor:
                 self._cooldown_start = timestamp
             return
 
-        # 체결 확인
+        # SL 체크 (WebSocket 가격만 사용, API 호출 없음 - 매 틱 실행)
+        if self._signal_ctx and price <= self._signal_ctx.sl_price:
+            logger.warning(
+                f"[scalping][{self._stock_name}] 매도 대기 중 SL 도달 → 시장가 전환"
+            )
+            self._cancel_sell_order()
+            self._market_sell_all("매도 대기 중 SL 도달")
+            return
+
+        # 체결 확인 스로틀링 (N초마다 한 번만 API 호출)
+        if self._last_order_check_time:
+            elapsed = (timestamp - self._last_order_check_time).total_seconds()
+            if elapsed < self._order_check_interval:
+                return
+        self._last_order_check_time = timestamp
+
+        # 체결 확인 (get_balance API 호출)
         filled_qty, unfilled_qty = self._broker.get_order_status(
             self._sell_order_id,
             stock_code=self._stock_code,
@@ -403,14 +451,6 @@ class ScalpingExecutor:
                 f"{filled_qty}주 체결, {unfilled_qty}주 대기"
             )
             return
-
-        # SL 체크 (매도 대기 중에도)
-        if self._signal_ctx and price <= self._signal_ctx.sl_price:
-            logger.warning(
-                f"[scalping][{self._stock_name}] 매도 대기 중 SL 도달 → 시장가 전환"
-            )
-            self._cancel_sell_order()
-            self._market_sell_all("매도 대기 중 SL 도달")
 
     def _handle_cooldown(self, price: int, timestamp: datetime) -> None:
         """COOLDOWN: 사이클 쿨다운 후 MONITORING 복귀"""
@@ -484,6 +524,7 @@ class ScalpingExecutor:
             self._sell_order_branch = result.order_branch
             self._sell_order_price = sell_price
             self._sell_order_qty = self._held_qty
+            self._last_order_check_time = None  # 첫 체결 확인 즉시 실행
             self._transition(ScalpingState.SELL_PENDING)
             logger.info(
                 f"[scalping][{self._stock_name}] 매도 주문: "

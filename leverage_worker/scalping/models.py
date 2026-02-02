@@ -48,6 +48,10 @@ class ScalpingConfig:
     cooldown_seconds: float = 1.0  # 사이클 간 쿨다운
     min_ticks_for_trade: int = 10  # 최소 tick 수
 
+    # 추세 필터
+    trend_filter_enabled: bool = True       # 추세 필터 활성화 여부
+    min_uptick_ratio: float = 0.4           # 상승틱 비율 최소값 (0.0~1.0)
+
     @classmethod
     def from_params(cls, params: Dict[str, Any]) -> "ScalpingConfig":
         """전략 파라미터 딕셔너리로부터 생성"""
@@ -68,6 +72,8 @@ class ScalpingConfig:
             max_cycles=params.get("max_cycles", 20),
             cooldown_seconds=params.get("cooldown_seconds", 1.0),
             min_ticks_for_trade=params.get("min_ticks_for_trade", 10),
+            trend_filter_enabled=params.get("trend_filter_enabled", True),
+            min_uptick_ratio=params.get("min_uptick_ratio", 0.4),
         )
 
 

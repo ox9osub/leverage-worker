@@ -571,3 +571,51 @@ class SessionManager:
     def get_account_info(self) -> tuple:
         """계좌 정보 반환 (계좌번호, 상품코드)"""
         return self._settings.account_number, self._settings.account_product_code
+
+    def get_ws_approval_key(self) -> str:
+        """WebSocket approval key 발급 (현재 모드에 맞는 키 사용)"""
+        server_url = self._settings.get_server_url()
+        url = f"{server_url}/oauth2/Approval"
+        body = {
+            "grant_type": "client_credentials",
+            "appkey": self._settings.app_key,
+            "secretkey": self._settings.app_secret,
+        }
+
+        try:
+            res = requests.post(
+                url,
+                json=body,
+                headers=self._get_base_header(),
+                timeout=10,
+            )
+            if res.status_code == 200:
+                approval_key = res.json().get("approval_key", "")
+                logger.info(
+                    f"WebSocket approval key 발급 성공 "
+                    f"(mode: {self._settings.mode.value})"
+                )
+                return approval_key
+            else:
+                logger.error(
+                    f"WebSocket approval key 발급 실패: "
+                    f"status={res.status_code}, body={res.text}"
+                )
+                return ""
+        except Exception as e:
+            logger.error(f"WebSocket approval key 요청 오류: {e}")
+            return ""
+
+    def get_ws_url(self) -> str:
+        """WebSocket URL 반환 (모의투자/실전투자 구분)"""
+        return self._settings.get_websocket_url()
+
+    @property
+    def app_key(self) -> str:
+        """현재 모드의 app_key 반환"""
+        return self._settings.app_key
+
+    @property
+    def hts_id(self) -> str:
+        """HTS ID 반환"""
+        return self._settings.hts_id
