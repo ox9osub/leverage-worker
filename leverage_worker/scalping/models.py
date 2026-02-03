@@ -52,6 +52,13 @@ class ScalpingConfig:
     trend_filter_enabled: bool = True       # 추세 필터 활성화 여부
     min_uptick_ratio: float = 0.4           # 상승틱 비율 최소값 (0.0~1.0)
 
+    # === Dynamic Boundary Tracking (NEW) ===
+    boundary_window_ticks: int = 15         # 바운더리 계산 틱 수
+    max_boundary_breaches: int = 5          # 최대 이탈 횟수
+    min_consecutive_downticks: int = 3      # DIP 판정 연속 하락틱
+    dip_margin_pct: float = 0.1             # 하단 근접 마진 (10% of range)
+    lower_history_size: int = 3             # 하한 바운더리 히스토리 크기
+
     @classmethod
     def from_params(cls, params: Dict[str, Any]) -> "ScalpingConfig":
         """전략 파라미터 딕셔너리로부터 생성"""
@@ -74,6 +81,12 @@ class ScalpingConfig:
             min_ticks_for_trade=params.get("min_ticks_for_trade", 10),
             trend_filter_enabled=params.get("trend_filter_enabled", True),
             min_uptick_ratio=params.get("min_uptick_ratio", 0.4),
+            # NEW: boundary tracking params
+            boundary_window_ticks=params.get("boundary_window_ticks", 15),
+            max_boundary_breaches=params.get("max_boundary_breaches", 5),
+            min_consecutive_downticks=params.get("min_consecutive_downticks", 3),
+            dip_margin_pct=params.get("dip_margin_pct", 0.1),
+            lower_history_size=params.get("lower_history_size", 3),
         )
 
 

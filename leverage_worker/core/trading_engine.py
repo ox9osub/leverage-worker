@@ -569,6 +569,7 @@ class TradingEngine:
                             strategy_name=name,
                             allocation=allocation,
                             ws_client=self._ws_client,
+                            slack_notifier=self._slack,
                         )
                         self._scalping_executors[key] = executor
                         logger.info(
@@ -1305,6 +1306,8 @@ class TradingEngine:
                             )
                             if strategy.can_generate_signal(context):
                                 signal = strategy.generate_signal(context)
+
+                                # LONG 시그널: 기존 로직
                                 if signal.is_buy and not executor.is_active:
                                     executor.activate_signal(
                                         signal_price=current_price,
@@ -1312,9 +1315,13 @@ class TradingEngine:
                                         sl_pct=executor._config.stop_loss_pct,
                                         timeout_minutes=executor._config.max_signal_minutes,
                                     )
-                                    self._slack.send_message(
-                                        f"[{stock_config.name}] 스캘핑 시그널 활성화: "
-                                        f"가격={current_price:,}원, {signal.reason}"
+                                    # Slack notification now handled in executor.activate_signal()
+
+                                # NEW: SHORT 시그널 → 활성화 중일 때만 처리
+                                elif signal.is_sell and executor.is_active:
+                                    executor.handle_short_signal(
+                                        short_price=current_price,
+                                        reason=signal.reason
                                     )
                         continue
 
