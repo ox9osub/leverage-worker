@@ -1,11 +1,12 @@
 """
-동적 바운더리 추적 및 DIP 패턴 감지
+동적 바운더리 추적 및 매수 시그널 생성
 
 틱 기반 마이크로 윈도우로 상/하단 바운더리를 추적하고,
-DIP 패턴 (3연속 하락 + 하단 근접 + 매수세 우위)을 감지하여 매수 시그널 생성.
+바운더리 range 0.1%~0.15%가 1초 유지 시 P10에서 매수 시그널 생성.
 """
 
 import threading
+import time
 from collections import deque
 from typing import Deque, Optional
 
@@ -30,20 +31,30 @@ class AdaptiveBoundaryTracker:
         min_consecutive_downticks: int = 3,
         dip_margin_pct: float = 0.1,
         lower_history_size: int = 3,
+        min_boundary_range_pct: float = 0.001,
+        max_boundary_range_pct: float = 0.0015,
+        boundary_hold_seconds: float = 1.0,
+        percentile_threshold: float = 10.0,
     ) -> None:
         """
         Args:
             boundary_window_ticks: 바운더리 계산에 사용할 틱 수
             max_boundary_breaches: 최대 허용 breach 횟수
-            min_consecutive_downticks: DIP 판정 최소 연속 하락틱
-            dip_margin_pct: 하단 근접 판정 마진 (바운더리 range의 %)
+            min_consecutive_downticks: DEPRECATED (하위 호환용)
+            dip_margin_pct: DEPRECATED (하위 호환용)
             lower_history_size: 하한 바운더리 히스토리 크기
+            min_boundary_range_pct: 바운더리 최소 range 비율 (0.001 = 0.1%)
+            max_boundary_range_pct: 바운더리 최대 range 비율 (0.0015 = 0.15%)
+            boundary_hold_seconds: range 유효 구간 유지 시간 (초)
+            percentile_threshold: 매수 가격 퍼센타일 (10.0 = P10)
         """
         self._boundary_window_ticks = boundary_window_ticks
         self._max_boundary_breaches = max_boundary_breaches
-        self._min_consecutive_downticks = min_consecutive_downticks
-        self._dip_margin_pct = dip_margin_pct
         self._lower_history_size = lower_history_size
+        self._min_boundary_range_pct = min_boundary_range_pct
+        self._max_boundary_range_pct = max_boundary_range_pct
+        self._boundary_hold_seconds = boundary_hold_seconds
+        self._percentile_threshold = percentile_threshold
 
         # 틱 데이터 (가격만 저장, 시간 불필요)
         self._ticks: Deque[int] = deque(maxlen=boundary_window_ticks)
@@ -53,12 +64,11 @@ class AdaptiveBoundaryTracker:
         self._lower_boundary: Optional[int] = None
         self._breach_count: int = 0
 
-        # DIP 패턴 추적
-        self._consecutive_downticks: int = 0
-        self._buy_pressure: float = 0.0  # 윈도우 내 누적 상승폭
-        self._sell_pressure: float = 0.0  # 윈도우 내 누적 하락폭
+        # DIP 트리거 상태 (range 구간 유지 시간)
+        self._range_qualified_at: Optional[float] = None
+        self._dip_fired: bool = False
 
-        # NEW: 하한 바운더리 히스토리
+        # 하한 바운더리 히스토리
         self._lower_boundary_history: Deque[int] = deque(maxlen=lower_history_size)
 
         self._lock = threading.Lock()
@@ -72,7 +82,7 @@ class AdaptiveBoundaryTracker:
 
         Returns:
             "BREACH": 하단 바운더리 이탈 (바운더리 리셋됨)
-            "DIP": DIP 조건 만족 (매수 시그널)
+            "DIP": range 0.1%~0.15% 1초 유지 (매수 시그널)
             None: 정상 (대기)
         """
         with self._lock:
@@ -88,45 +98,78 @@ class AdaptiveBoundaryTracker:
                     self._reset_boundary()
                     return "BREACH"
 
-            # 2. 틱 추가 (이전 가격 저장)
-            prev_price = self._ticks[-1] if self._ticks else price
+            # 2. 틱 추가
             self._ticks.append(price)
 
             # 3. 바운더리 재계산 (윈도우 full일 때만)
             if len(self._ticks) >= self._boundary_window_ticks:
                 self._update_boundary()
 
-            # 4. 연속 하락틱 추적 및 pressure 계산
-            if price < prev_price:
-                self._consecutive_downticks += 1
-                self._sell_pressure += (prev_price - price)
-            elif price > prev_price:
-                self._consecutive_downticks = 0  # 상승 시 리셋
-                self._buy_pressure += (price - prev_price)
-            # else: 동일 가격 → downticks 유지, pressure 변화 없음
-
-            # 5. DIP 조건 확인
-            if self._check_dip_condition(price):
-                logger.info(
-                    f"[boundary] DIP 감지: {price:,}원 "
-                    f"(하단 {self._lower_boundary:,}원, "
-                    f"연속 하락 {self._consecutive_downticks}틱, "
-                    f"매수세 {self._buy_pressure:.0f} > "
-                    f"매도세 {self._sell_pressure:.0f})"
+            # 4. DIP 조건: range 0.1%~0.15% 구간 1초 유지
+            if (
+                self._lower_boundary is not None
+                and self._upper_boundary is not None
+                and self._lower_boundary > 0
+            ):
+                range_pct = (
+                    (self._upper_boundary - self._lower_boundary)
+                    / self._lower_boundary
                 )
-                return "DIP"
+                in_zone = (
+                    self._min_boundary_range_pct
+                    <= range_pct
+                    <= self._max_boundary_range_pct
+                )
+
+                if in_zone:
+                    now = time.monotonic()
+                    if self._range_qualified_at is None:
+                        self._range_qualified_at = now
+                        logger.debug(
+                            f"[boundary] range 유효 구간 진입: "
+                            f"{range_pct:.3%} "
+                            f"({self._lower_boundary:,}~{self._upper_boundary:,})"
+                        )
+                    elif (
+                        not self._dip_fired
+                        and now - self._range_qualified_at
+                        >= self._boundary_hold_seconds
+                    ):
+                        self._dip_fired = True
+                        logger.info(
+                            f"[boundary] DIP 감지: range={range_pct:.3%} "
+                            f"({self._boundary_hold_seconds}초 유지), "
+                            f"P{self._percentile_threshold:.0f} 매수 트리거 "
+                            f"({self._lower_boundary:,}~{self._upper_boundary:,})"
+                        )
+                        return "DIP"
+                else:
+                    if self._range_qualified_at is not None:
+                        logger.debug(
+                            f"[boundary] range 구간 이탈: "
+                            f"{range_pct:.3%}"
+                        )
+                    self._range_qualified_at = None
 
             return None
 
     def get_buy_price(self) -> Optional[int]:
         """
-        DIP 감지 시 매수 가격 반환
+        DIP 감지 시 매수 가격 반환 (P10 = 10th percentile)
 
         Returns:
-            하단 바운더리 가격, 미확립 시 None
+            바운더리 틱의 percentile_threshold 가격, 미확립 시 None
         """
         with self._lock:
-            return self._lower_boundary
+            if self._lower_boundary is None or len(self._ticks) == 0:
+                return None
+
+            sorted_ticks = sorted(self._ticks)
+            idx = max(
+                0,
+                int(len(sorted_ticks) * self._percentile_threshold / 100.0) - 1,
+            )
+            return sorted_ticks[idx]
 
     def is_trading_allowed(self) -> bool:
         """
@@ -183,11 +226,10 @@ class AdaptiveBoundaryTracker:
         self._upper_boundary = max(self._ticks)
         self._lower_boundary = min(self._ticks)
 
-        # NEW: 하한 바운더리 히스토리 업데이트
-        if self._lower_boundary is not None:
-            self._lower_boundary_history.append(self._lower_boundary)
+        # 하한 바운더리 히스토리 업데이트
+        self._lower_boundary_history.append(self._lower_boundary)
 
-        # 바운더리 확립/변경 로그 (초기 또는 변경 시)
+        # 바운더리 확립/변경 로그
         if prev_lower is None or prev_upper is None:
             logger.info(
                 f"[boundary] 바운더리 확립: "
@@ -203,90 +245,17 @@ class AdaptiveBoundaryTracker:
                 f"{self._lower_boundary:,}원 ~ {self._upper_boundary:,}원"
             )
 
-    def _check_dip_condition(self, price: int) -> bool:
-        """
-        DIP 조건 확인
-
-        조건:
-        1. 바운더리 확립됨
-        2. N연속 하락틱 (default 3)
-        3. 가격이 하단 근접 (lower + margin 이내)
-        4. 매수세 > 매도세
-
-        Args:
-            price: 현재가
-
-        Returns:
-            True if all conditions met, False otherwise
-
-        내부 메서드, lock 내부에서만 호출됨
-        """
-        # 조건 1: 바운더리 확립
-        if self._lower_boundary is None or self._upper_boundary is None:
-            return False
-
-        # 조건 2: N연속 하락틱
-        if self._consecutive_downticks < self._min_consecutive_downticks:
-            return False
-
-        # 조건 3: 하단 근접
-        boundary_range = self._upper_boundary - self._lower_boundary
-        if boundary_range <= 0:
-            # 모든 틱이 동일 가격 → margin=0, 정확히 동일해야 통과
-            margin = 0
-        else:
-            margin = int(boundary_range * self._dip_margin_pct)
-
-        if price > (self._lower_boundary + margin):
-            return False
-
-        # 조건 4: 매수세 > 매도세
-        if self._buy_pressure <= self._sell_pressure:
-            return False
-
-        # NEW: 조건 5: 하한 바운더리 하락 추세 체크
-        if self._is_lower_boundary_falling():
-            logger.debug(
-                f"[boundary] 하한 하락 추세 감지 → DIP 거부 "
-                f"(history: {list(self._lower_boundary_history)})"
-            )
-            return False
-
-        return True
-
-    def _is_lower_boundary_falling(self) -> bool:
-        """
-        하한 바운더리가 지속적으로 하락 중인지 체크
-
-        Returns:
-            True if 최근 N개가 모두 연속 하락 (예: [100, 99, 98])
-            False otherwise
-
-        내부 메서드, lock 내부에서만 호출됨
-        """
-        if len(self._lower_boundary_history) < self._lower_history_size:
-            return False  # 히스토리 부족
-
-        # 최근 N개가 연속 하락인지 체크
-        history = list(self._lower_boundary_history)
-        for i in range(len(history) - 1):
-            if history[i] <= history[i + 1]:
-                return False  # 하락 아님 또는 동일
-
-        return True  # 모두 연속 하락
-
     def _reset_boundary(self) -> None:
         """
         바운더리만 리셋 (breach 발생 시)
 
         틱 데이터는 유지 (deque maxlen으로 자동 관리),
-        바운더리 및 패턴 추적 상태만 초기화.
+        바운더리 및 DIP 상태만 초기화.
 
         내부 메서드, lock 내부에서만 호출됨
         """
         self._upper_boundary = None
         self._lower_boundary = None
-        self._consecutive_downticks = 0
-        self._buy_pressure = 0.0
-        self._sell_pressure = 0.0
+        self._range_qualified_at = None
+        self._dip_fired = False
         logger.debug("[boundary] 바운더리 리셋 (새 윈도우 시작)")

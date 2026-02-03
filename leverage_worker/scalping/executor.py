@@ -80,13 +80,17 @@ class ScalpingExecutor:
         self._state = ScalpingState.IDLE
         self._signal_ctx: Optional[ScalpingSignalContext] = None
 
-        # NEW: Dynamic boundary tracker (틱 기반)
+        # Dynamic boundary tracker (틱 기반, range 0.1%~0.15% 1초 유지 시 DIP)
         self._boundary_tracker = AdaptiveBoundaryTracker(
             boundary_window_ticks=config.boundary_window_ticks,
             max_boundary_breaches=config.max_boundary_breaches,
             min_consecutive_downticks=config.min_consecutive_downticks,
             dip_margin_pct=config.dip_margin_pct,
             lower_history_size=config.lower_history_size,
+            min_boundary_range_pct=config.min_boundary_range_pct,
+            max_boundary_range_pct=config.max_boundary_range_pct,
+            boundary_hold_seconds=config.boundary_hold_seconds,
+            percentile_threshold=config.percentile_threshold,
         )
 
         # DEPRECATED: Old time-based tracker (backward compatibility)
@@ -176,15 +180,18 @@ class ScalpingExecutor:
 
             # Slack notification
             if self._slack:
-                self._slack.notify_signal(
-                    stock_code=self._stock_code,
-                    stock_name=self._stock_name,
-                    signal_type="BUY",
-                    price=signal_price,
-                    strategy_name=self._strategy_name,
-                    reason=f"스캘핑 시작 (TP={tp_pct*100:.1f}%, SL={sl_pct*100:.1f}%)",
-                    strategy_win_rate=None,
-                )
+                try:
+                    self._slack.notify_signal(
+                        stock_code=self._stock_code,
+                        stock_name=self._stock_name,
+                        signal_type="BUY",
+                        price=signal_price,
+                        strategy_name=self._strategy_name,
+                        reason=f"스캘핑 시작 (TP={tp_pct*100:.1f}%, SL={sl_pct*100:.1f}%)",
+                        strategy_win_rate=None,
+                    )
+                except Exception as e:
+                    logger.warning(f"[scalping] Slack 알림 실패: {e}")
 
     def handle_short_signal(self, short_price: int, reason: str) -> None:
         """
@@ -208,12 +215,15 @@ class ScalpingExecutor:
 
             # Slack 알림
             if self._slack:
-                self._slack.send_message(
-                    f"⚠️ [{self._stock_name}] SHORT 반전 감지\n"
-                    f"• 가격: {short_price:,}원\n"
-                    f"• 사유: {reason}\n"
-                    f"• 조치: 즉시 청산 ({self._state.value})"
-                )
+                try:
+                    self._slack.send_message(
+                        f"⚠️ [{self._stock_name}] SHORT 반전 감지\n"
+                        f"• 가격: {short_price:,}원\n"
+                        f"• 사유: {reason}\n"
+                        f"• 조치: 즉시 청산 ({self._state.value})"
+                    )
+                except Exception as e:
+                    logger.warning(f"[scalping] Slack 알림 실패: {e}")
 
             if self._state == ScalpingState.MONITORING:
                 # DIP 바운더리 찾는 중 → 즉시 종료
@@ -348,16 +358,17 @@ class ScalpingExecutor:
 
             # Slack notification - full fill
             if self._slack:
-                self._slack.notify_fill(
-                    stock_code=self._stock_code,
-                    stock_name=self._stock_name,
-                    side="BUY",
-                    quantity=self._held_qty,
-                    price=filled_price,
-                    order_type="LIMIT",
-                    strategy_name=self._strategy_name,
-                    additional_info=f"[WS] 전량 체결 ({self._held_qty}주)",
-                )
+                try:
+                    self._slack.notify_fill(
+                        fill_type="BUY",
+                        stock_code=self._stock_code,
+                        stock_name=self._stock_name,
+                        quantity=self._held_qty,
+                        price=filled_price,
+                        strategy_name=self._strategy_name,
+                    )
+                except Exception as e:
+                    logger.warning(f"[scalping] Slack 알림 실패: {e}")
 
             return True
 
@@ -371,16 +382,17 @@ class ScalpingExecutor:
 
             # Slack notification - partial fill
             if self._slack:
-                self._slack.notify_fill(
-                    stock_code=self._stock_code,
-                    stock_name=self._stock_name,
-                    side="BUY",
-                    quantity=actual_fill,
-                    price=filled_price,
-                    order_type="LIMIT",
-                    strategy_name=self._strategy_name,
-                    additional_info=f"[WS] 부분 체결 ({self._held_qty}/{self._buy_order_qty}주)",
-                )
+                try:
+                    self._slack.notify_fill(
+                        fill_type="BUY",
+                        stock_code=self._stock_code,
+                        stock_name=self._stock_name,
+                        quantity=actual_fill,
+                        price=filled_price,
+                        strategy_name=self._strategy_name,
+                    )
+                except Exception as e:
+                    logger.warning(f"[scalping] Slack 알림 실패: {e}")
         else:
             # POSITION_HELD에서 추가 체결
             logger.info(
@@ -390,16 +402,17 @@ class ScalpingExecutor:
 
             # Slack notification - additional fill
             if self._slack:
-                self._slack.notify_fill(
-                    stock_code=self._stock_code,
-                    stock_name=self._stock_name,
-                    side="BUY",
-                    quantity=actual_fill,
-                    price=filled_price,
-                    order_type="LIMIT",
-                    strategy_name=self._strategy_name,
-                    additional_info=f"[WS] 추가 체결 ({self._held_qty}/{self._buy_order_qty}주)",
-                )
+                try:
+                    self._slack.notify_fill(
+                        fill_type="BUY",
+                        stock_code=self._stock_code,
+                        stock_name=self._stock_name,
+                        quantity=actual_fill,
+                        price=filled_price,
+                        strategy_name=self._strategy_name,
+                    )
+                except Exception as e:
+                    logger.warning(f"[scalping] Slack 알림 실패: {e}")
 
         return True
 
@@ -427,26 +440,20 @@ class ScalpingExecutor:
 
             # Slack notification - sell fill with PnL
             if self._slack and self._signal_ctx:
-                profit_pct = ((filled_price / buy_price) - 1) * 100 if buy_price > 0 else 0
-                # _record_cycle_complete()에서 이미 cycle_count++, total_pnl += pnl 완료
-                cycle_num = self._signal_ctx.cycle_count
-                total_after_sell = self._signal_ctx.total_pnl
-
-                self._slack.notify_fill(
-                    stock_code=self._stock_code,
-                    stock_name=self._stock_name,
-                    side="SELL",
-                    quantity=filled_qty,
-                    price=filled_price,
-                    order_type="LIMIT",
-                    strategy_name=self._strategy_name,
-                    additional_info=(
-                        f"[WS] 전량 매도 체결 | "
-                        f"손익: {pnl:,}원 ({profit_pct:+.2f}%) | "
-                        f"사이클 {cycle_num}회 | "
-                        f"누적: {total_after_sell:,}원"
-                    ),
-                )
+                try:
+                    profit_pct = ((filled_price / buy_price) - 1) * 100 if buy_price > 0 else 0
+                    self._slack.notify_fill(
+                        fill_type="SELL",
+                        stock_code=self._stock_code,
+                        stock_name=self._stock_name,
+                        quantity=filled_qty,
+                        price=filled_price,
+                        strategy_name=self._strategy_name,
+                        profit_loss=pnl,
+                        profit_rate=profit_pct,
+                    )
+                except Exception as e:
+                    logger.warning(f"[scalping] Slack 알림 실패: {e}")
 
             return True
 
@@ -493,11 +500,14 @@ class ScalpingExecutor:
 
             # Slack notification - safety stop
             if self._slack:
-                self._slack.send_message(
-                    f"⚠️ [{self._stock_name}] 스캘핑 안전 중단\n"
-                    f"• 사유: 최대 breach 도달 ({breach_count}회)\n"
-                    f"• 조치: 거래 중단"
-                )
+                try:
+                    self._slack.send_message(
+                        f"⚠️ [{self._stock_name}] 스캘핑 안전 중단\n"
+                        f"• 사유: 최대 breach 도달 ({breach_count}회)\n"
+                        f"• 조치: 거래 중단"
+                    )
+                except Exception as e:
+                    logger.warning(f"[scalping] Slack 알림 실패: {e}")
 
             self._reset_to_idle()
             return
@@ -517,9 +527,13 @@ class ScalpingExecutor:
         # 4. 호가 단위 맞춤
         buy_price = round_to_tick_size(buy_price, direction="down")
 
-        # 5. 시그널 가격 체크 (선택적, 필요시)
-        # if buy_price > self._signal_ctx.signal_price:
-        #     return  # 시그널 가격보다 높으면 스킵
+        # 5. 시그널 가격 체크: P10이 시그널가보다 낮아야 매수
+        if buy_price >= self._signal_ctx.signal_price:
+            logger.debug(
+                f"[scalping][{self._stock_name}] P10({buy_price:,}) >= "
+                f"시그널가({self._signal_ctx.signal_price:,}) → 매수 대기"
+            )
+            return
 
         # 6. 매수 수량 결정
         try:
@@ -567,18 +581,21 @@ class ScalpingExecutor:
 
             # Slack notification - buy order
             if self._slack:
-                self._slack.notify_buy(
-                    stock_code=self._stock_code,
-                    stock_name=self._stock_name,
-                    quantity=quantity,
-                    price=buy_price,
-                    strategy_name=self._strategy_name,
-                    reason=(
-                        f"DIP 매수 (breach={self._boundary_tracker.get_breach_count()}, "
-                        f"boundary={lower:,}~{upper:,}원, {tick_count}틱)"
-                    ),
-                    strategy_win_rate=None,
-                )
+                try:
+                    self._slack.notify_buy(
+                        stock_code=self._stock_code,
+                        stock_name=self._stock_name,
+                        quantity=quantity,
+                        price=buy_price,
+                        strategy_name=self._strategy_name,
+                        reason=(
+                            f"DIP 매수 (breach={self._boundary_tracker.get_breach_count()}, "
+                            f"boundary={lower:,}~{upper:,}원, {tick_count}틱)"
+                        ),
+                        strategy_win_rate=None,
+                    )
+                except Exception as e:
+                    logger.warning(f"[scalping] Slack 알림 실패: {e}")
         else:
             logger.error(
                 f"[scalping][{self._stock_name}] 매수 주문 실패: {result.message}"
@@ -627,16 +644,17 @@ class ScalpingExecutor:
 
             # Slack notification - REST buy fill
             if self._slack:
-                self._slack.notify_fill(
-                    stock_code=self._stock_code,
-                    stock_name=self._stock_name,
-                    side="BUY",
-                    quantity=new_fills,
-                    price=self._buy_order_price,
-                    order_type="LIMIT",
-                    strategy_name=self._strategy_name,
-                    additional_info=f"[REST] 매수 체결 ({filled_qty}주)",
-                )
+                try:
+                    self._slack.notify_fill(
+                        fill_type="BUY",
+                        stock_code=self._stock_code,
+                        stock_name=self._stock_name,
+                        quantity=new_fills,
+                        price=self._buy_order_price,
+                        strategy_name=self._strategy_name,
+                    )
+                except Exception as e:
+                    logger.warning(f"[scalping] Slack 알림 실패: {e}")
 
         if unfilled_qty == 0 and filled_qty > 0:
             # Full fill
@@ -686,16 +704,17 @@ class ScalpingExecutor:
 
                             # Slack notification - REST additional buy fill
                             if self._slack:
-                                self._slack.notify_fill(
-                                    stock_code=self._stock_code,
-                                    stock_name=self._stock_name,
-                                    side="BUY",
-                                    quantity=new_fills,
-                                    price=self._buy_order_price,
-                                    order_type="LIMIT",
-                                    strategy_name=self._strategy_name,
-                                    additional_info=f"[REST] 추가 체결 ({filled_qty}/{self._buy_order_qty}주)",
-                                )
+                                try:
+                                    self._slack.notify_fill(
+                                        fill_type="BUY",
+                                        stock_code=self._stock_code,
+                                        stock_name=self._stock_name,
+                                        quantity=new_fills,
+                                        price=self._buy_order_price,
+                                        strategy_name=self._strategy_name,
+                                    )
+                                except Exception as e:
+                                    logger.warning(f"[scalping] Slack 알림 실패: {e}")
 
                         if unfilled_qty == 0:
                             self._clear_buy_order()
@@ -793,26 +812,20 @@ class ScalpingExecutor:
 
             # Slack notification - REST sell fill with PnL
             if self._slack and self._signal_ctx:
-                profit_pct = ((self._sell_order_price / buy_price) - 1) * 100 if buy_price > 0 else 0
-                # _record_cycle_complete()에서 이미 cycle_count++, total_pnl += pnl 완료
-                cycle_num = self._signal_ctx.cycle_count
-                total_after_sell = self._signal_ctx.total_pnl
-
-                self._slack.notify_fill(
-                    stock_code=self._stock_code,
-                    stock_name=self._stock_name,
-                    side="SELL",
-                    quantity=filled_qty,
-                    price=self._sell_order_price,
-                    order_type="LIMIT",
-                    strategy_name=self._strategy_name,
-                    additional_info=(
-                        f"[REST] 전량 매도 체결 | "
-                        f"손익: {pnl:,}원 ({profit_pct:+.2f}%) | "
-                        f"사이클 {cycle_num}회 | "
-                        f"누적: {total_after_sell:,}원"
-                    ),
-                )
+                try:
+                    profit_pct = ((self._sell_order_price / buy_price) - 1) * 100 if buy_price > 0 else 0
+                    self._slack.notify_fill(
+                        fill_type="SELL",
+                        stock_code=self._stock_code,
+                        stock_name=self._stock_name,
+                        quantity=filled_qty,
+                        price=self._sell_order_price,
+                        strategy_name=self._strategy_name,
+                        profit_loss=pnl,
+                        profit_rate=profit_pct,
+                    )
+                except Exception as e:
+                    logger.warning(f"[scalping] Slack 알림 실패: {e}")
 
     def _handle_cooldown(self, price: int, timestamp: datetime) -> None:
         """
@@ -847,16 +860,19 @@ class ScalpingExecutor:
 
         # Slack notification - signal termination
         if self._slack and self._signal_ctx:
-            total_cycles = self._signal_ctx.cycle_count
-            total_pnl = self._signal_ctx.total_pnl
+            try:
+                total_cycles = self._signal_ctx.cycle_count
+                total_pnl = self._signal_ctx.total_pnl
 
-            self._slack.send_message(
-                f"[{self._stock_name}] 스캘핑 시그널 종료\n"
-                f"• 사유: {reason}\n"
-                f"• 완료 사이클: {total_cycles}회\n"
-                f"• 누적 손익: {total_pnl:,}원\n"
-                f"• 평균 손익: {total_pnl//total_cycles if total_cycles > 0 else 0:,}원/사이클"
-            )
+                self._slack.send_message(
+                    f"[{self._stock_name}] 스캘핑 시그널 종료\n"
+                    f"• 사유: {reason}\n"
+                    f"• 완료 사이클: {total_cycles}회\n"
+                    f"• 누적 손익: {total_pnl:,}원\n"
+                    f"• 평균 손익: {total_pnl//total_cycles if total_cycles > 0 else 0:,}원/사이클"
+                )
+            except Exception as e:
+                logger.warning(f"[scalping] Slack 알림 실패: {e}")
 
         # SL 도달인 경우
         is_sl = "SL" in reason
@@ -910,16 +926,22 @@ class ScalpingExecutor:
 
             # Slack notification - sell order
             if self._slack:
-                profit_pct = self._config.sell_profit_pct * 100
-                self._slack.notify_sell(
-                    stock_code=self._stock_code,
-                    stock_name=self._stock_name,
-                    quantity=self._held_qty,
-                    price=sell_price,
-                    strategy_name=self._strategy_name,
-                    reason=f"목표 +{profit_pct:.1f}% 매도 ({sell_price:,}원)",
-                    profit_loss=None,
-                )
+                try:
+                    profit_pct = self._config.sell_profit_pct * 100
+                    expected_profit = int((sell_price - self._held_avg_price) * self._held_qty)
+                    expected_rate = ((sell_price / self._held_avg_price) - 1) * 100 if self._held_avg_price > 0 else 0.0
+                    self._slack.notify_sell(
+                        stock_code=self._stock_code,
+                        stock_name=self._stock_name,
+                        quantity=self._held_qty,
+                        price=sell_price,
+                        profit_loss=expected_profit,
+                        profit_rate=expected_rate,
+                        strategy_name=self._strategy_name,
+                        reason=f"목표 +{profit_pct:.1f}% 매도 ({sell_price:,}원)",
+                    )
+                except Exception as e:
+                    logger.warning(f"[scalping] Slack 알림 실패: {e}")
         else:
             logger.error(
                 f"[scalping][{self._stock_name}] 매도 주문 실패: {result.message} → 시장가 매도"
@@ -940,15 +962,19 @@ class ScalpingExecutor:
 
         # Slack notification - market sell order
         if self._slack:
-            self._slack.notify_sell(
-                stock_code=self._stock_code,
-                stock_name=self._stock_name,
-                quantity=self._held_qty,
-                price=0,  # Market order, price unknown
-                strategy_name=self._strategy_name,
-                reason=f"시장가 매도 ({reason})",
-                profit_loss=None,
-            )
+            try:
+                self._slack.notify_sell(
+                    stock_code=self._stock_code,
+                    stock_name=self._stock_name,
+                    quantity=self._held_qty,
+                    price=0,
+                    profit_loss=0,
+                    profit_rate=0.0,
+                    strategy_name=self._strategy_name,
+                    reason=f"시장가 매도 ({reason})",
+                )
+            except Exception as e:
+                logger.warning(f"[scalping] Slack 알림 실패: {e}")
 
         result = self._broker.place_market_order(
             stock_code=self._stock_code,

@@ -232,9 +232,9 @@ class SlackNotifier:
         signal_type: str,
         stock_code: str,
         stock_name: str,
-        quantity: int,
-        price: int,
-        strategy_name: str,
+        quantity: Optional[int] = None,
+        price: int = 0,
+        strategy_name: str = "",
         reason: str = "",
         strategy_win_rate: Optional[float] = None,
         tp_price: Optional[int] = None,
@@ -268,15 +268,26 @@ class SlackNotifier:
         # HTTP 호출은 lock 밖
         is_buy = signal_type.upper() == "BUY"
         signal_text = "매수시그널" if is_buy else "매도시그널"
-        total_amount = quantity * price
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         strategy_display = strategy_name
         if strategy_win_rate is not None:
             strategy_display = f"{strategy_name}({strategy_win_rate:.1f}%)"
 
+        if quantity is not None:
+            total_amount = quantity * price
+            header = (
+                f"{self._get_mode_prefix()}[{signal_text}] "
+                f"{stock_name}({stock_code}) / {quantity}주 / {price:,}원 / {total_amount:,}원"
+            )
+        else:
+            header = (
+                f"{self._get_mode_prefix()}[{signal_text}] "
+                f"{stock_name}({stock_code}) / {price:,}원"
+            )
+
         lines = [
-            f"{self._get_mode_prefix()}[{signal_text}] {stock_name}({stock_code}) / {quantity}주 / {price:,}원 / {total_amount:,}원",
+            header,
             f"전략: {strategy_display}" + (f" / {reason}" if reason else ""),
         ]
 
