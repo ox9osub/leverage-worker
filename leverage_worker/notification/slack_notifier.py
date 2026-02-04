@@ -175,7 +175,7 @@ class SlackNotifier:
             strategy_display = f"{strategy_name}({strategy_win_rate:.1f}%)"
 
         lines = [
-            f"{self._get_mode_prefix()}[매수 프로세스 완료] {stock_name}({stock_code}) / {quantity}주 / {price:,}원 / {total_amount:,}원",
+            f"{self._get_mode_prefix()}[매수 주문 완료] {stock_name}({stock_code}) / {quantity}주 / {price:,}원 / {total_amount:,}원",
             f"전략: {strategy_display}" + (f" / {reason}" if reason else ""),
             timestamp,
         ]
@@ -373,8 +373,9 @@ class SlackNotifier:
 
         # 매도 체결 시 손익 정보 추가
         if not is_buy:
-            sign = "+" if profit_loss >= 0 else ""
-            lines.append(f"손익: {sign}{profit_loss:,}원 ({sign}{profit_rate:.2f}%)")
+            pnl_sign = "+" if profit_loss >= 0 else ""
+            rate_sign = "+" if profit_rate >= 0 else ""
+            lines.append(f"손익: {pnl_sign}{profit_loss:,}원 ({rate_sign}{profit_rate:.2f}%)")
 
         lines.append(f"전략: {strategy_display}")
 

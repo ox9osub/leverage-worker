@@ -429,9 +429,7 @@ class ScalpingExecutor:
 
         if filled_qty >= self._sell_order_qty:
             # Full sell fill
-            # BUG FIX: _clear_position() 전에 _held_avg_price 저장
-            buy_price = self._held_avg_price
-            pnl = int((filled_price - self._held_avg_price) * filled_qty)
+            pnl, profit_pct = self._compute_sell_pnl(filled_price, filled_qty)
             self._record_cycle_complete(pnl)
             self._clear_sell_order()
             self._clear_position()
@@ -445,7 +443,6 @@ class ScalpingExecutor:
             # Slack notification - sell fill with PnL
             if self._slack and self._signal_ctx:
                 try:
-                    profit_pct = ((filled_price / buy_price) - 1) * 100 if buy_price > 0 else 0
                     self._slack.notify_fill(
                         fill_type="SELL",
                         stock_code=self._stock_code,
@@ -675,7 +672,8 @@ class ScalpingExecutor:
         elif filled_qty > 0:
             # Partial fill
             self._transition(ScalpingState.POSITION_HELD)
-        if self._buy_order_time:
+        elif self._buy_order_time:
+            # 체결 없음 → 타임아웃 체크 (부분체결 시에는 POSITION_HELD에서 TP/SL 처리)
             elapsed = (timestamp - self._buy_order_time).total_seconds()
             if elapsed >= self._config.buy_timeout_seconds:
                 logger.info(
@@ -815,12 +813,11 @@ class ScalpingExecutor:
 
         if unfilled_qty == 0 and filled_qty > 0:
             # Full sell fill
-            # BUG FIX: _clear_position() 전에 _held_avg_price 저장
-            buy_price = self._held_avg_price
-            pnl = int((self._sell_order_price - self._held_avg_price) * filled_qty)
+            sell_price = self._sell_order_price
+            pnl, profit_pct = self._compute_sell_pnl(sell_price, filled_qty)
             logger.info(
                 f"[scalping][{self._stock_name}] 매도 체결 (REST 폴백): "
-                f"{self._sell_order_price:,}원 x {filled_qty}주, 손익: {pnl:,}원"
+                f"{sell_price:,}원 x {filled_qty}주, 손익: {pnl:,}원"
             )
             self._record_cycle_complete(pnl)
             self._clear_sell_order()
@@ -831,13 +828,12 @@ class ScalpingExecutor:
             # Slack notification - REST sell fill with PnL
             if self._slack and self._signal_ctx:
                 try:
-                    profit_pct = ((self._sell_order_price / buy_price) - 1) * 100 if buy_price > 0 else 0
                     self._slack.notify_fill(
                         fill_type="SELL",
                         stock_code=self._stock_code,
                         stock_name=self._stock_name,
                         quantity=filled_qty,
-                        price=self._sell_order_price,
+                        price=sell_price,
                         strategy_name=self._strategy_name,
                         profit_loss=pnl,
                         profit_rate=profit_pct,
@@ -1052,6 +1048,8 @@ class ScalpingExecutor:
 
     def _cancel_buy_and_return_to_monitoring(self) -> None:
         """매수 취소 후 MONITORING 복귀 (취소 중 체결 처리 포함)"""
+        cancel_qty = self._buy_order_qty
+        cancel_price = self._buy_order_price
         self._cancel_buy_order()
 
         # 취소 후 최종 체결 상태 확인
@@ -1071,6 +1069,17 @@ class ScalpingExecutor:
 
         self._clear_buy_order()
         self._transition(ScalpingState.MONITORING)
+
+        # Slack 알림 - 매수 타임아웃 취소
+        if self._slack:
+            try:
+                self._slack.send_message(
+                    f"⏱️ [{self._stock_name}] 매수 주문 타임아웃 취소\n"
+                    f"• {cancel_price:,}원 x {cancel_qty}주 → 미체결 취소\n"
+                    f"• 바운더리 재탐색 중"
+                )
+            except Exception:
+                pass
 
     def _cleanup_all_orders(self) -> None:
         """모든 미체결 주문 취소"""
@@ -1148,6 +1157,21 @@ class ScalpingExecutor:
         self._buy_order_price = 0
         self._buy_order_qty = 0
         self._buy_order_time = None
+
+
+    def _compute_sell_pnl(self, sell_price: int, sell_qty: int) -> tuple[int, float]:
+        """매도 손익 계산. PositionManager 우선 사용."""
+        if self._position_manager:
+            self._position_manager.update_price(self._stock_code, sell_price)
+            mp = self._position_manager.get_position(self._stock_code)
+            if mp:
+                return mp.profit_loss, mp.profit_rate
+
+        # Fallback: PositionManager 없을 때 자체 계산
+        buy_price = self._held_avg_price
+        pnl = int((sell_price - buy_price) * sell_qty)
+        pct = ((sell_price / buy_price) - 1) * 100 if buy_price > 0 else 0.0
+        return pnl, pct
 
     def _clear_sell_order(self) -> None:
         self._sell_order_id = None
