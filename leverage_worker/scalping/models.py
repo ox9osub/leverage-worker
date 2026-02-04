@@ -61,6 +61,7 @@ class ScalpingConfig:
     min_boundary_range_pct: float = 0.001   # 바운더리 최소 range (0.1%)
     max_boundary_range_pct: float = 0.0015  # 바운더리 최대 range (0.15%)
     boundary_hold_seconds: float = 1.0      # range 유지 시간 (초)
+    boundary_window_seconds: float = 1.0   # 바운더리 시간 윈도우 (초, 틱 수와 OR 조건)
 
     @classmethod
     def from_params(cls, params: Dict[str, Any]) -> "ScalpingConfig":
@@ -93,6 +94,7 @@ class ScalpingConfig:
             min_boundary_range_pct=params.get("min_boundary_range_pct", 0.001),
             max_boundary_range_pct=params.get("max_boundary_range_pct", 0.0015),
             boundary_hold_seconds=params.get("boundary_hold_seconds", 1.0),
+            boundary_window_seconds=params.get("boundary_window_seconds", 1.0),
         )
 
 

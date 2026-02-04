@@ -93,6 +93,7 @@ class ScalpingExecutor:
             min_boundary_range_pct=config.min_boundary_range_pct,
             max_boundary_range_pct=config.max_boundary_range_pct,
             boundary_hold_seconds=config.boundary_hold_seconds,
+            boundary_window_seconds=config.boundary_window_seconds,
             percentile_threshold=config.percentile_threshold,
         )
 
@@ -274,15 +275,15 @@ class ScalpingExecutor:
             if self._state == ScalpingState.IDLE:
                 return
 
-            # NEW: boundary tracker에 틱 추가 및 이벤트 감지
-            event = self._boundary_tracker.add_tick(price)
-            if event == "BREACH":
-                logger.info(
-                    f"[scalping][{self._stock_name}] 바운더리 이탈 "
-                    f"({self._boundary_tracker.get_breach_count()}회)"
-                )
-                # MONITORING 상태면 계속 대기
-                # BUY_PENDING/POSITION_HELD이면 주문/포지션 유지
+            # boundary tracker: MONITORING/BUY_PENDING에서만 동작
+            event = None
+            if self._state in (ScalpingState.MONITORING, ScalpingState.BUY_PENDING):
+                event = self._boundary_tracker.add_tick(price)
+                if event == "BREACH":
+                    logger.info(
+                        f"[scalping][{self._stock_name}] 바운더리 이탈 "
+                        f"({self._boundary_tracker.get_breach_count()}회)"
+                    )
 
             # DEPRECATED: old tracker tick (backward compatibility)
             self._price_tracker.add_tick(timestamp, price)
@@ -730,7 +731,7 @@ class ScalpingExecutor:
                         if unfilled_qty == 0:
                             self._clear_buy_order()
                             logger.info(
-                                f"[REST 폴백] 전량 매수 체결 → 즉시 매도: "
+                                f"[REST 폴백] 전량 매수 체결 → 즉시 매도 주문: "
                                 f"{self._held_qty}주 @ {self._held_avg_price:,.0f}원"
                             )
                             self._place_sell_order()

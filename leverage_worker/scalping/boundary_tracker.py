@@ -8,7 +8,7 @@
 import threading
 import time
 from collections import deque
-from typing import Deque, Optional
+from typing import Deque, Optional, Tuple
 
 from leverage_worker.utils.logger import get_logger
 
@@ -34,6 +34,7 @@ class AdaptiveBoundaryTracker:
         min_boundary_range_pct: float = 0.001,
         max_boundary_range_pct: float = 0.0015,
         boundary_hold_seconds: float = 1.0,
+        boundary_window_seconds: float = 1.0,
         percentile_threshold: float = 10.0,
     ) -> None:
         """
@@ -46,6 +47,7 @@ class AdaptiveBoundaryTracker:
             min_boundary_range_pct: 바운더리 최소 range 비율 (0.001 = 0.1%)
             max_boundary_range_pct: 바운더리 최대 range 비율 (0.0015 = 0.15%)
             boundary_hold_seconds: range 유효 구간 유지 시간 (초)
+            boundary_window_seconds: 바운더리 시간 윈도우 (초), 틱 수와 OR 조건
             percentile_threshold: 매수 가격 퍼센타일 (10.0 = P10)
         """
         self._boundary_window_ticks = boundary_window_ticks
@@ -54,10 +56,11 @@ class AdaptiveBoundaryTracker:
         self._min_boundary_range_pct = min_boundary_range_pct
         self._max_boundary_range_pct = max_boundary_range_pct
         self._boundary_hold_seconds = boundary_hold_seconds
+        self._boundary_window_seconds = boundary_window_seconds
         self._percentile_threshold = percentile_threshold
 
-        # 틱 데이터 (가격만 저장, 시간 불필요)
-        self._ticks: Deque[int] = deque(maxlen=boundary_window_ticks)
+        # 틱 데이터 (시간+가격 저장, 시간/틱 이중 윈도우)
+        self._ticks: Deque[Tuple[float, int]] = deque()
 
         # 바운더리 상태
         self._upper_boundary: Optional[int] = None
@@ -98,11 +101,24 @@ class AdaptiveBoundaryTracker:
                     self._reset_boundary()
                     return "BREACH"
 
-            # 2. 틱 추가
-            self._ticks.append(price)
+            # 2. 틱 추가 (시간+가격)
+            now = time.monotonic()
+            self._ticks.append((now, price))
 
-            # 3. 바운더리 재계산 (윈도우 full일 때만)
-            if len(self._ticks) >= self._boundary_window_ticks:
+            # 만료: 시간 윈도우 밖 + 틱 수 초과분 제거
+            cutoff = now - self._boundary_window_seconds
+            while (
+                len(self._ticks) > self._boundary_window_ticks
+                and self._ticks[0][0] < cutoff
+            ):
+                self._ticks.popleft()
+
+            # 3. 바운더리 재계산 (틱 수 OR 시간 윈도우 충족 시)
+            time_span = now - self._ticks[0][0] if self._ticks else 0
+            if (
+                len(self._ticks) >= self._boundary_window_ticks
+                or time_span >= self._boundary_window_seconds
+            ):
                 self._update_boundary()
 
             # 4. DIP 조건: range 0.1%~0.15% 구간 1초 유지
@@ -164,7 +180,7 @@ class AdaptiveBoundaryTracker:
             if self._lower_boundary is None or len(self._ticks) == 0:
                 return None
 
-            sorted_ticks = sorted(self._ticks)
+            sorted_ticks = sorted(t[1] for t in self._ticks)
             idx = max(
                 0,
                 int(len(sorted_ticks) * self._percentile_threshold / 100.0) - 1,
@@ -217,14 +233,15 @@ class AdaptiveBoundaryTracker:
 
         내부 메서드, lock 내부에서만 호출됨
         """
-        if len(self._ticks) < self._boundary_window_ticks:
+        if not self._ticks:
             return
 
         prev_lower = self._lower_boundary
         prev_upper = self._upper_boundary
 
-        self._upper_boundary = max(self._ticks)
-        self._lower_boundary = min(self._ticks)
+        prices = [t[1] for t in self._ticks]
+        self._upper_boundary = max(prices)
+        self._lower_boundary = min(prices)
 
         # 하한 바운더리 히스토리 업데이트
         self._lower_boundary_history.append(self._lower_boundary)
@@ -249,8 +266,7 @@ class AdaptiveBoundaryTracker:
         """
         바운더리만 리셋 (breach 발생 시)
 
-        틱 데이터는 유지 (deque maxlen으로 자동 관리),
-        바운더리 및 DIP 상태만 초기화.
+        틱 데이터는 유지, 바운더리 및 DIP 상태만 초기화.
 
         내부 메서드, lock 내부에서만 호출됨
         """
