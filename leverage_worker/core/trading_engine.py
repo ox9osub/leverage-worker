@@ -570,6 +570,7 @@ class TradingEngine:
                             allocation=allocation,
                             ws_client=self._ws_client,
                             slack_notifier=self._slack,
+                            position_manager=self._position_manager,
                         )
                         self._scalping_executors[key] = executor
                         logger.info(
@@ -698,12 +699,20 @@ class TradingEngine:
             profit_loss = 0
             profit_rate = 0.0
 
+            # 체결가 방어: filled_price가 0이면 avg_price 또는 주문가로 fallback
+            fill_price = order.filled_price
+            if fill_price <= 0:
+                fill_price = int(avg_price) if avg_price > 0 else order.price
+                logger.warning(
+                    f"[{order.stock_code}] filled_price=0 → fallback: {fill_price:,}원"
+                )
+
             if order.side == OrderSide.SELL:
                 # 전달받은 avg_price로 손익 계산 (position 삭제 전 저장된 값)
                 if avg_price > 0:
-                    profit_loss = int((order.filled_price - avg_price) * filled_qty)
+                    profit_loss = int((fill_price - avg_price) * filled_qty)
                     profit_rate = (
-                        (order.filled_price - avg_price) / avg_price * 100
+                        (fill_price - avg_price) / avg_price * 100
                     )
 
                 # 당일 누적 실현손익 업데이트
@@ -733,7 +742,7 @@ class TradingEngine:
                 stock_code=order.stock_code,
                 stock_name=order.stock_name,
                 quantity=filled_qty,
-                price=order.filled_price,
+                price=fill_price,
                 strategy_name=order.strategy_name or "",
                 profit_loss=profit_loss,
                 profit_rate=profit_rate,

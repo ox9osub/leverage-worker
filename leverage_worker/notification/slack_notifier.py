@@ -341,6 +341,14 @@ class SlackNotifier:
         if strategy_win_rate is not None:
             strategy_display = f"{strategy_name}({strategy_win_rate:.1f}%)"
 
+        # 부분 체결 여부 판단
+        is_partial = (
+            total_filled is not None
+            and order_quantity is not None
+            and total_filled < order_quantity
+        )
+        partial_tag = " (부분)" if is_partial else ""
+
         # 분할 체결 표시 (현재/누적/전체)
         fill_ratio = ""
         if total_filled is not None and order_quantity is not None:
@@ -348,11 +356,11 @@ class SlackNotifier:
 
         # 첫 줄 구성 (매도체결 시 아이콘과 수익률 추가)
         if is_buy:
-            first_line = f"{self._get_mode_prefix()}[{fill_text}]{fill_ratio}"
+            first_line = f"{self._get_mode_prefix()}[{fill_text}{partial_tag}]{fill_ratio}"
         else:
             profit_icon = "📈" if profit_rate >= 0 else "📉"
             sign = "+" if profit_rate >= 0 else ""
-            first_line = f"{self._get_mode_prefix()}[{fill_text}]{fill_ratio} {profit_icon} {sign}{profit_rate:.2f}%"
+            first_line = f"{self._get_mode_prefix()}[{fill_text}{partial_tag}]{fill_ratio} {profit_icon} {sign}{profit_rate:.2f}%"
 
         lines = [
             first_line,

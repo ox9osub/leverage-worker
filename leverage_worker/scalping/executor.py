@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
+    from leverage_worker.trading.position_manager import PositionManager
     from leverage_worker.websocket.ws_client import RealtimeWSClient
 
 from leverage_worker.notification.slack_notifier import SlackNotifier
@@ -66,6 +67,7 @@ class ScalpingExecutor:
         allocation: float = 100.0,
         ws_client: Optional["RealtimeWSClient"] = None,
         slack_notifier: Optional[SlackNotifier] = None,
+        position_manager: Optional["PositionManager"] = None,
     ) -> None:
         self._stock_code = stock_code
         self._stock_name = stock_name
@@ -75,6 +77,7 @@ class ScalpingExecutor:
         self._allocation = allocation
         self._ws_client = ws_client
         self._slack = slack_notifier
+        self._position_manager = position_manager
 
         # 상태
         self._state = ScalpingState.IDLE
@@ -120,7 +123,7 @@ class ScalpingExecutor:
 
         # 체결 확인 스로틀링 (API 호출 제한)
         self._last_order_check_time: Optional[datetime] = None
-        self._order_check_interval: float = 3.0  # 초 단위 (3초마다 balance 확인)
+        self._order_check_interval: float = 1.0  # 초 단위 (1초마다 balance 확인)
 
         # 스레드 안전
         self._lock = threading.Lock()
@@ -622,6 +625,14 @@ class ScalpingExecutor:
         if self._ws_client and self._ws_client.is_order_notice_active:
             return
 
+        # WS 비활성 → REST 폴백 사용
+        if self._ws_client:
+            logger.debug(
+                f"[scalping] WS 비활성 - REST 폴백 "
+                f"(subscribed={getattr(self._ws_client, '_order_notice_subscribed', 'N/A')}, "
+                f"running={getattr(self._ws_client, '_running', 'N/A')})"
+            )
+
         # REST fallback: throttle 적용
         if self._last_order_check_time:
             elapsed = (timestamp - self._last_order_check_time).total_seconds()
@@ -718,6 +729,12 @@ class ScalpingExecutor:
 
                         if unfilled_qty == 0:
                             self._clear_buy_order()
+                            logger.info(
+                                f"[REST 폴백] 전량 매수 체결 → 즉시 매도: "
+                                f"{self._held_qty}주 @ {self._held_avg_price:,.0f}원"
+                            )
+                            self._place_sell_order()
+                            return
                 else:
                     self._last_order_check_time = timestamp
 
@@ -1104,6 +1121,21 @@ class ScalpingExecutor:
             self._held_avg_price = float(fill_price)
         self._held_qty = total_filled_qty
 
+        # PositionManager 동기화
+        if self._position_manager:
+            try:
+                self._position_manager.add_position(
+                    stock_code=self._stock_code,
+                    stock_name=self._stock_name,
+                    quantity=new_qty,
+                    avg_price=fill_price,
+                    current_price=fill_price,
+                    strategy_name=self._strategy_name,
+                    order_id=self._buy_order_id or "",
+                )
+            except Exception as e:
+                logger.error(f"[scalping] PositionManager 동기화 실패: {e}")
+
     def _calculate_sell_price(self, avg_price: float) -> int:
         """매도 목표가 계산 (+0.1%, 호가 단위 올림)"""
         raw = avg_price * (1 + self._config.sell_profit_pct)
@@ -1125,6 +1157,13 @@ class ScalpingExecutor:
     def _clear_position(self) -> None:
         self._held_qty = 0
         self._held_avg_price = 0.0
+
+        # PositionManager에서 포지션 제거
+        if self._position_manager:
+            try:
+                self._position_manager.remove_position(self._stock_code)
+            except Exception as e:
+                logger.error(f"[scalping] PositionManager 포지션 제거 실패: {e}")
 
     def _record_cycle_complete(self, pnl: int) -> None:
         """매매 사이클 완료 기록"""

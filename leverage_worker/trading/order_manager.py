@@ -961,7 +961,7 @@ class OrderManager:
                     with self._order_lock:
                         if broker_order:
                             order.filled_qty = filled_qty
-                            order.filled_price = broker_order.filled_price
+                            order.filled_price = broker_order.filled_price if broker_order.filled_price > 0 else limit_price
                         else:
                             logger.warning(f"[{stock_code}] 전량 체결 정보 조회 실패 (지정가 사용)")
                             order.filled_qty = filled_qty
@@ -998,7 +998,7 @@ class OrderManager:
                 with self._order_lock:
                     if broker_order:
                         order.filled_qty = filled_qty
-                        order.filled_price = broker_order.filled_price
+                        order.filled_price = broker_order.filled_price if broker_order.filled_price > 0 else limit_price
                     else:
                         logger.warning(f"[{stock_code}] 부분 체결 정보 조회 실패: {filled_qty}주 체결됨 (지정가 사용)")
                         order.filled_qty = filled_qty
@@ -1040,7 +1040,7 @@ class OrderManager:
                     with self._order_lock:
                         if broker_order:
                             order.filled_qty = final_filled
-                            order.filled_price = broker_order.filled_price
+                            order.filled_price = broker_order.filled_price if broker_order.filled_price > 0 else limit_price
                         else:
                             logger.warning(f"[{stock_code}] 취소 중 체결 정보 조회 실패 (지정가 사용)")
                             order.filled_qty = final_filled
@@ -1248,6 +1248,14 @@ class OrderManager:
 
                 # EC-5: WS가 이미 업데이트했을 수 있음 → 최신값과 비교
                 if broker_filled > order.filled_qty:
+                    # filled_price가 0이면 API에 가격 미반영 → 다음 폴링 대기
+                    if broker_order.filled_price <= 0:
+                        logger.debug(
+                            f"[{order.stock_code}] 체결 감지 but 가격 미반영 "
+                            f"(filled={broker_filled}, price=0) → 다음 폴링 대기"
+                        )
+                        continue
+
                     prev_filled = order.filled_qty
                     order.filled_qty = broker_filled  # 절대값 업데이트
                     order.filled_price = broker_order.filled_price

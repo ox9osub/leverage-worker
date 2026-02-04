@@ -143,16 +143,27 @@ class RealtimeWSClient:
 
             # 체결통보 구독 (HTS ID 기반, 1회만)
             if self._hts_id and self._on_order_notice:
-                env_dv = "demo" if self._is_paper else "real"
-                ka.KISWebSocket.subscribe(
-                    request=ccnl_notice,
-                    data=[self._hts_id],
-                    kwargs={"env_dv": env_dv},
-                )
-                self._order_notice_subscribed = True
-                logger.info(
-                    f"Subscribed to order notice (hts_id={self._hts_id}, env={env_dv})"
-                )
+                try:
+                    env_dv = "demo" if self._is_paper else "real"
+                    ka.KISWebSocket.subscribe(
+                        request=ccnl_notice,
+                        data=[self._hts_id],
+                        kwargs={"env_dv": env_dv},
+                    )
+                    self._order_notice_subscribed = True
+                    logger.info(
+                        f"Subscribed to order notice (hts_id={self._hts_id}, env={env_dv})"
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"[WS] 체결통보 구독 실패: {e} - REST 폴백으로 동작합니다"
+                    )
+                    self._order_notice_subscribed = False
+            else:
+                if not self._hts_id:
+                    logger.warning("[WS] hts_id 미설정 - 체결통보 구독 불가")
+                if not self._on_order_notice:
+                    logger.warning("[WS] on_order_notice 콜백 미설정")
 
             # WebSocket 시작 (블로킹)
             self._kws.start(
