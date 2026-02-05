@@ -68,6 +68,7 @@ class ScalpingExecutor:
         ws_client: Optional["RealtimeWSClient"] = None,
         slack_notifier: Optional[SlackNotifier] = None,
         position_manager: Optional["PositionManager"] = None,
+        trading_db: Optional["TradingDatabase"] = None,
     ) -> None:
         self._stock_code = stock_code
         self._stock_name = stock_name
@@ -78,6 +79,7 @@ class ScalpingExecutor:
         self._ws_client = ws_client
         self._slack = slack_notifier
         self._position_manager = position_manager
+        self._db = trading_db
 
         # 상태
         self._state = ScalpingState.IDLE
@@ -114,6 +116,10 @@ class ScalpingExecutor:
         self._sell_order_branch: Optional[str] = None
         self._sell_order_price: int = 0
         self._sell_order_qty: int = 0
+
+        # 매도 체결 누적 추적
+        self._sold_qty: int = 0          # 현재 매도 주문 누적 체결 수량
+        self._sold_pnl: int = 0          # 현재 매도 주문 누적 PnL (부분 매도 합산)
 
         # 포지션 추적 (executor 자체 관리)
         self._held_qty: int = 0
@@ -191,7 +197,11 @@ class ScalpingExecutor:
                         signal_type="BUY",
                         price=signal_price,
                         strategy_name=self._strategy_name,
-                        reason=f"스캘핑 시작 (TP={tp_pct*100:.1f}%, SL={sl_pct*100:.1f}%)",
+                        reason=(
+                            f"스캘핑 시작 "
+                            f"(TP={self._signal_ctx.tp_price:,}원/{tp_pct*100:.1f}%, "
+                            f"SL={self._signal_ctx.sl_price:,}원/{sl_pct*100:.1f}%)"
+                        ),
                         strategy_win_rate=None,
                     )
                 except Exception as e:
@@ -350,6 +360,11 @@ class ScalpingExecutor:
         # Update position (cumulative)
         self._update_position(self._held_qty + actual_fill, filled_price)
 
+        # DB 업데이트
+        self._update_order_fill_in_db(
+            self._buy_order_id, self._held_qty, filled_price
+        )
+
         # Check if fully filled
         if self._held_qty >= self._buy_order_qty:
             # Full fill → immediate sell
@@ -422,22 +437,53 @@ class ScalpingExecutor:
 
     def _handle_ws_sell_fill(self, filled_qty: int, filled_price: int) -> bool:
         """매도 체결 WS 처리 (증분)"""
-        # EC-2: 중복 알림 방지 - 이미 COOLDOWN이면 무시
+        # EC-2: 이미 COOLDOWN이면 무시
         if self._state == ScalpingState.COOLDOWN:
-            logger.debug(f"[WS] 중복 매도 체결 알림 무시 (already in COOLDOWN)")
+            logger.debug("[WS] 중복 매도 체결 알림 무시 (already in COOLDOWN)")
             return True
 
-        if filled_qty >= self._sell_order_qty:
-            # Full sell fill
-            pnl, profit_pct = self._compute_sell_pnl(filled_price, filled_qty)
-            self._record_cycle_complete(pnl)
+        # 중복 방지: 이미 전량 체결이면 무시
+        if self._sold_qty >= self._sell_order_qty:
+            logger.debug("[WS] 이미 전량 매도 체결됨, 추가 알림 무시")
+            return True
+
+        # 실제 반영 수량 (초과 방지)
+        remaining_sell = self._sell_order_qty - self._sold_qty
+        actual_fill = min(filled_qty, remaining_sell)
+        if actual_fill <= 0:
+            return True
+
+        # 누적 업데이트
+        self._sold_qty += actual_fill
+
+        # 이번 체결분 PnL
+        fill_pnl = int((filled_price - self._held_avg_price) * actual_fill)
+        self._sold_pnl += fill_pnl
+
+        # held_qty 차감 (E-3에서 정확한 잔여 수량 보장)
+        self._held_qty = max(self._held_qty - actual_fill, 0)
+
+        # DB 업데이트 (누적 체결 정보)
+        self._update_order_fill_in_db(
+            self._sell_order_id, self._sold_qty, filled_price,
+            pnl=self._sold_pnl, avg_cost=self._held_avg_price,
+            pnl_rate=((filled_price / self._held_avg_price) - 1) * 100 if self._held_avg_price > 0 else 0.0,
+        )
+
+        if self._sold_qty >= self._sell_order_qty:
+            # === Full sell fill (단건이든 분할이든) ===
+            total_pnl = self._sold_pnl
+            profit_pct = ((filled_price / self._held_avg_price) - 1) * 100 if self._held_avg_price > 0 else 0.0
+            self._record_cycle_complete(total_pnl)
+
+            sell_qty_for_log = self._sell_order_qty  # clear 전에 저장
             self._clear_sell_order()
             self._clear_position()
             self._cooldown_start = datetime.now()
             self._transition(ScalpingState.COOLDOWN)
             logger.info(
-                f"[WS] 전량 매도 체결: {filled_qty}주 @ {filled_price:,}원, "
-                f"손익: {pnl:,}원"
+                f"[WS] 전량 매도 체결: {sell_qty_for_log}주 @ {filled_price:,}원, "
+                f"손익: {total_pnl:,}원"
             )
 
             # Slack notification - sell fill with PnL
@@ -447,21 +493,37 @@ class ScalpingExecutor:
                         fill_type="SELL",
                         stock_code=self._stock_code,
                         stock_name=self._stock_name,
-                        quantity=filled_qty,
+                        quantity=sell_qty_for_log,
                         price=filled_price,
                         strategy_name=self._strategy_name,
-                        profit_loss=pnl,
+                        profit_loss=total_pnl,
                         profit_rate=profit_pct,
                     )
                 except Exception as e:
                     logger.warning(f"[scalping] Slack 알림 실패: {e}")
-
             return True
 
-        # Partial sell (keep waiting)
-        logger.debug(
-            f"[WS] 부분 매도: {filled_qty}/{self._sell_order_qty}주 @ {filled_price:,}원"
+        # === Partial sell ===
+        logger.info(
+            f"[WS] 부분 매도: {actual_fill}주 @ {filled_price:,}원 "
+            f"(누적 {self._sold_qty}/{self._sell_order_qty}주)"
         )
+
+        # Slack 알림 - 부분 매도
+        if self._slack:
+            try:
+                self._slack.notify_fill(
+                    fill_type="SELL",
+                    stock_code=self._stock_code,
+                    stock_name=self._stock_name,
+                    quantity=actual_fill,
+                    price=filled_price,
+                    strategy_name=self._strategy_name,
+                    total_filled=self._sold_qty,
+                    order_quantity=self._sell_order_qty,
+                )
+            except Exception:
+                pass
         return True
 
     def deactivate(self) -> None:
@@ -470,8 +532,9 @@ class ScalpingExecutor:
             logger.info(f"[scalping][{self._stock_name}] 강제 종료 시작")
             self._cleanup_all_orders()
             if self._held_qty > 0:
-                self._market_sell_all("강제 종료")
-            self._reset_to_idle()
+                self._market_sell_all("강제 종료", force_immediate=True)
+            else:
+                self._reset_to_idle()
 
     # ──────────────────────────────────────────
     # 상태 핸들러
@@ -528,11 +591,18 @@ class ScalpingExecutor:
         # 4. 호가 단위 맞춤
         buy_price = round_to_tick_size(buy_price, direction="down")
 
-        # 5. 시그널 가격 체크: P10이 시그널가보다 낮아야 매수
-        if buy_price >= self._signal_ctx.signal_price:
+        # 5. P20 시그널가 하락률 체크
+        signal_price = self._signal_ctx.signal_price
+        p20_price = self._boundary_tracker.get_percentile_price(20.0)
+        if p20_price is None:
+            return
+
+        dip_rate = (signal_price - p20_price) / signal_price
+        min_dip = self._config.dip_from_signal_pct
+        if dip_rate < min_dip:
             logger.debug(
-                f"[scalping][{self._stock_name}] P10({buy_price:,}) >= "
-                f"시그널가({self._signal_ctx.signal_price:,}) → 매수 대기"
+                f"[scalping][{self._stock_name}] P20({p20_price:,}) "
+                f"하락률 {dip_rate*100:.3f}% < {min_dip*100:.2f}% → 매수 대기"
             )
             return
 
@@ -570,6 +640,9 @@ class ScalpingExecutor:
             self._buy_order_time = timestamp
             self._last_order_check_time = None
             self._transition(ScalpingState.BUY_PENDING)
+
+            # DB 저장
+            self._save_order_to_db(result.order_id, "BUY", quantity, buy_price)
 
             # 디버깅 정보 풍부하게
             lower, upper, tick_count = self._boundary_tracker.get_boundary_info()
@@ -651,6 +724,11 @@ class ScalpingExecutor:
             self._update_position(filled_qty, self._buy_order_price)
             logger.info(f"[REST 폴백] 매수 체결: +{new_fills}주")
 
+            # DB 업데이트
+            self._update_order_fill_in_db(
+                self._buy_order_id, filled_qty, self._buy_order_price
+            )
+
             # Slack notification - REST buy fill
             if self._slack:
                 try:
@@ -712,6 +790,11 @@ class ScalpingExecutor:
                             self._update_position(filled_qty, self._buy_order_price)
                             logger.info(f"[REST 폴백] 추가 매수 체결: +{new_fills}주")
 
+                            # DB 업데이트 - 추가 매수 체결
+                            self._update_order_fill_in_db(
+                                self._buy_order_id, filled_qty, self._buy_order_price
+                            )
+
                             # Slack notification - REST additional buy fill
                             if self._slack:
                                 try:
@@ -750,6 +833,7 @@ class ScalpingExecutor:
             )
             # 매수 주문 남아있으면 먼저 취소
             if self._buy_order_id:
+                cancel_qty = self._buy_order_qty - self._held_qty
                 self._cancel_buy_order()
 
                 # 취소 후 최종 체결량 재확인 (취소 중 체결 가능)
@@ -762,16 +846,40 @@ class ScalpingExecutor:
                 if final_filled > self._held_qty:
                     self._update_position(final_filled, self._buy_order_price)
                     logger.info(f"[취소 중 체결] +{final_filled - self._held_qty}주")
+
+                # Slack 알림 - TP 매수 취소
+                if self._slack:
+                    try:
+                        self._slack.send_message(
+                            f"📊 [{self._stock_name}] TP 도달 → 미체결 매수 취소\n"
+                            f"• 취소: {cancel_qty}주 / 체결: {self._held_qty}주\n"
+                            f"• 시장가 매도 진행"
+                        )
+                    except Exception:
+                        pass
                 self._clear_buy_order()
 
             # 부분체결 상황 → 시장가 매도
             self._market_sell_all("부분체결 TP 도달")
+            return  # SELL_PENDING 전환 후 즉시 반환 (SL 중복 실행 방지)
 
         # SL 체크 (매 틱)
         if self._signal_ctx and price <= self._signal_ctx.sl_price:
             logger.warning(f"[scalping][{self._stock_name}] SL 도달 → 시장가 매도")
             if self._buy_order_id:
+                cancel_qty = self._buy_order_qty - self._held_qty
                 self._cancel_buy_order()
+
+                # Slack 알림 - SL 매수 취소
+                if self._slack:
+                    try:
+                        self._slack.send_message(
+                            f"🛑 [{self._stock_name}] SL 도달 → 미체결 매수 취소\n"
+                            f"• 취소: {cancel_qty}주 / 체결: {self._held_qty}주\n"
+                            f"• 시장가 매도 진행"
+                        )
+                    except Exception:
+                        pass
                 self._clear_buy_order()
             self._market_sell_all("SL 도달")
 
@@ -788,7 +896,13 @@ class ScalpingExecutor:
         # SL 체크 (매 틱, API 호출 없음)
         if self._signal_ctx and price <= self._signal_ctx.sl_price:
             logger.warning(f"[scalping] 매도 대기 중 SL 도달 → 시장가 전환")
+
+            # 부분 매도 PnL 보존 후 주문 정리
+            saved_sold_pnl = self._sold_pnl
             self._cancel_sell_order()
+            self._clear_sell_order()
+            self._sold_pnl = saved_sold_pnl  # 부분 매도 PnL 복원
+
             self._market_sell_all("매도 대기 중 SL 도달")
             return
 
@@ -812,20 +926,43 @@ class ScalpingExecutor:
         )
 
         if unfilled_qty == 0 and filled_qty > 0:
-            # Full sell fill
-            sell_price = self._sell_order_price
-            pnl, profit_pct = self._compute_sell_pnl(sell_price, filled_qty)
+            # Full sell fill via REST
+
+            # 체결가 결정: 지정가=주문가, 시장가=현재가(근사)
+            if self._sell_order_price > 0:
+                sell_price = self._sell_order_price
+            else:
+                sell_price = price  # 시장가: 현재 틱 가격을 근사치로 사용
+
+            # REST에서 새로 확인된 체결 (WS에서 미처리분)
+            new_fills = max(0, filled_qty - self._sold_qty)
+            if new_fills > 0:
+                new_pnl = int((sell_price - self._held_avg_price) * new_fills)
+                self._sold_pnl += new_pnl
+                self._held_qty = max(self._held_qty - new_fills, 0)
+                self._sold_qty = filled_qty
+
+            total_pnl = self._sold_pnl
+            profit_pct = ((sell_price / self._held_avg_price) - 1) * 100 if self._held_avg_price > 0 else 0.0
+
             logger.info(
-                f"[scalping][{self._stock_name}] 매도 체결 (REST 폴백): "
-                f"{sell_price:,}원 x {filled_qty}주, 손익: {pnl:,}원"
+                f"[scalping][{self._stock_name}] 매도 체결 (REST): "
+                f"{sell_price:,}원 x {filled_qty}주, 손익: {total_pnl:,}원"
             )
-            self._record_cycle_complete(pnl)
+            self._record_cycle_complete(total_pnl)
+
+            # DB 업데이트
+            self._update_order_fill_in_db(
+                self._sell_order_id, filled_qty, sell_price,
+                pnl=total_pnl, avg_cost=self._held_avg_price, pnl_rate=profit_pct,
+            )
+
             self._clear_sell_order()
             self._clear_position()
             self._cooldown_start = timestamp
             self._transition(ScalpingState.COOLDOWN)
 
-            # Slack notification - REST sell fill with PnL
+            # Slack notification
             if self._slack and self._signal_ctx:
                 try:
                     self._slack.notify_fill(
@@ -835,7 +972,7 @@ class ScalpingExecutor:
                         quantity=filled_qty,
                         price=sell_price,
                         strategy_name=self._strategy_name,
-                        profit_loss=pnl,
+                        profit_loss=total_pnl,
                         profit_rate=profit_pct,
                     )
                 except Exception as e:
@@ -847,16 +984,35 @@ class ScalpingExecutor:
 
         바운더리가 새로 구성될 때까지 자동 대기하므로 시간 기반 cooldown 불필요
         """
+        # Slack dedup 초기화: 다음 사이클 알림 허용
+        if self._slack:
+            self._slack.reset_signal_for_key(self._stock_code, self._strategy_name)
+
         # 최대 사이클 수 확인
         if self._signal_ctx and self._signal_ctx.cycle_count >= self._config.max_cycles:
             logger.info(
                 f"[scalping][{self._stock_name}] 최대 사이클 도달 "
                 f"({self._signal_ctx.cycle_count}/{self._config.max_cycles})"
             )
+            # Slack 종료 알림
+            if self._slack and self._signal_ctx:
+                try:
+                    ctx = self._signal_ctx
+                    self._slack.send_message(
+                        f"[{self._stock_name}] 스캘핑 거래 완료\n"
+                        f"• 완료 사이클: {ctx.cycle_count}/{self._config.max_cycles}회\n"
+                        f"• 누적 손익: {ctx.total_pnl:,}원\n"
+                        f"• 다음 시그널 대기 중"
+                    )
+                except Exception:
+                    pass
             self._reset_to_idle()
             return
 
-        # NEW: 즉시 MONITORING 복귀 (시간 대기 제거)
+        # 바운더리/DIP 상태 초기화 (틱/breach는 유지)
+        self._boundary_tracker.reset_for_new_cycle()
+
+        # 즉시 MONITORING 복귀
         self._cooldown_start = None
         self._transition(ScalpingState.MONITORING)
         logger.info(
@@ -932,6 +1088,10 @@ class ScalpingExecutor:
             self._sell_order_qty = self._held_qty
             self._last_order_check_time = None  # 첫 체결 확인 즉시 실행
             self._transition(ScalpingState.SELL_PENDING)
+
+            # DB 저장
+            self._save_order_to_db(result.order_id, "SELL", self._held_qty, sell_price)
+
             logger.info(
                 f"[scalping][{self._stock_name}] 매도 주문: "
                 f"{sell_price:,}원 x {self._held_qty}주 "
@@ -962,16 +1122,18 @@ class ScalpingExecutor:
             )
             self._market_sell_all("지정가 매도 실패 → 시장가")
 
-    def _market_sell_all(self, reason: str) -> None:
+    def _market_sell_all(self, reason: str, force_immediate: bool = False) -> None:
         """시장가 전량 매도"""
         if self._held_qty <= 0:
             self._log_signal_summary()
             self._reset_to_idle()
             return
 
+        sell_qty = self._held_qty
+
         logger.info(
             f"[scalping][{self._stock_name}] 시장가 매도: "
-            f"{self._held_qty}주 ({reason})"
+            f"{sell_qty}주 ({reason})"
         )
 
         # Slack notification - market sell order
@@ -980,7 +1142,7 @@ class ScalpingExecutor:
                 self._slack.notify_sell(
                     stock_code=self._stock_code,
                     stock_name=self._stock_name,
-                    quantity=self._held_qty,
+                    quantity=sell_qty,
                     price=0,
                     profit_loss=0,
                     profit_rate=0.0,
@@ -993,22 +1155,48 @@ class ScalpingExecutor:
         result = self._broker.place_market_order(
             stock_code=self._stock_code,
             side=OrderSide.SELL,
-            quantity=self._held_qty,
+            quantity=sell_qty,
         )
 
         if result.success:
-            # 시장가는 즉시 체결로 간주
-            pnl = 0  # 시장가는 정확한 체결가를 모르므로 0으로 기록
-            self._record_cycle_complete(pnl)
+            # DB 저장 (시장가)
+            self._save_order_to_db(
+                result.order_id, "SELL", sell_qty, 0, order_type="market"
+            )
+
+            if force_immediate:
+                # 비상 경로: 즉시 처리 (deactivate 등)
+                self._update_order_fill_in_db(
+                    result.order_id, sell_qty, 0,
+                    pnl=self._sold_pnl, avg_cost=self._held_avg_price, pnl_rate=0.0,
+                )
+                self._record_cycle_complete(self._sold_pnl)
+                self._clear_position()
+                self._clear_sell_order()
+                self._log_signal_summary()
+                self._reset_to_idle()
+            else:
+                # 정상 경로: SELL_PENDING으로 전환, WS 체결 대기
+                saved_sold_pnl = self._sold_pnl  # 기존 부분 매도 PnL 보존
+                self._sell_order_id = result.order_id
+                self._sell_order_branch = getattr(result, 'order_branch', None)
+                self._sell_order_price = 0  # 시장가
+                self._sell_order_qty = sell_qty
+                self._sold_qty = 0          # 새 주문의 누적 초기화
+                self._sold_pnl = saved_sold_pnl  # 이전 부분 매도 PnL 유지
+                self._last_order_check_time = None  # REST 즉시 확인 가능
+                self._transition(ScalpingState.SELL_PENDING)
         else:
             logger.error(
                 f"[scalping][{self._stock_name}] 시장가 매도 실패: {result.message}"
             )
-
-        self._clear_position()
-        self._clear_sell_order()
-        self._log_signal_summary()
-        self._reset_to_idle()
+            # 주문 실패: 기존 부분 매도 PnL만 기록
+            if self._sold_pnl != 0:
+                self._record_cycle_complete(self._sold_pnl)
+            self._clear_position()
+            self._clear_sell_order()
+            self._log_signal_summary()
+            self._reset_to_idle()
 
     def _cancel_buy_order(self) -> bool:
         """매수 주문 취소"""
@@ -1098,19 +1286,22 @@ class ScalpingExecutor:
 
         if self._sell_order_id:
             self._cancel_sell_order()
-            # 취소 중 체결 확인
             filled_qty, _ = self._broker.get_order_status(
                 self._sell_order_id,
                 stock_code=self._stock_code,
                 order_qty=self._sell_order_qty,
                 side=OrderSide.SELL,
             )
-            if filled_qty > 0:
-                pnl = int((self._sell_order_price - self._held_avg_price) * filled_qty)
-                remaining = self._held_qty - filled_qty
-                self._held_qty = max(remaining, 0)
-                if self._signal_ctx:
-                    self._signal_ctx.total_pnl += pnl
+            # REST에서 확인한 추가 체결 (WS에서 미처리분만)
+            new_fills = max(0, filled_qty - self._sold_qty)
+            if new_fills > 0:
+                sell_price = self._sell_order_price if self._sell_order_price > 0 else self._held_avg_price
+                additional_pnl = int((sell_price - self._held_avg_price) * new_fills)
+                self._sold_pnl += additional_pnl
+                self._held_qty = max(self._held_qty - new_fills, 0)
+            # 전체 매도 PnL을 signal_ctx에 기록
+            if self._signal_ctx and self._sold_pnl != 0:
+                self._signal_ctx.total_pnl += self._sold_pnl
             self._clear_sell_order()
 
     # ──────────────────────────────────────────
@@ -1160,14 +1351,7 @@ class ScalpingExecutor:
 
 
     def _compute_sell_pnl(self, sell_price: int, sell_qty: int) -> tuple[int, float]:
-        """매도 손익 계산. PositionManager 우선 사용."""
-        if self._position_manager:
-            self._position_manager.update_price(self._stock_code, sell_price)
-            mp = self._position_manager.get_position(self._stock_code)
-            if mp:
-                return mp.profit_loss, mp.profit_rate
-
-        # Fallback: PositionManager 없을 때 자체 계산
+        """매도 손익 계산 (직접 계산)"""
         buy_price = self._held_avg_price
         pnl = int((sell_price - buy_price) * sell_qty)
         pct = ((sell_price / buy_price) - 1) * 100 if buy_price > 0 else 0.0
@@ -1178,6 +1362,8 @@ class ScalpingExecutor:
         self._sell_order_branch = None
         self._sell_order_price = 0
         self._sell_order_qty = 0
+        self._sold_qty = 0
+        self._sold_pnl = 0
 
     def _clear_position(self) -> None:
         self._held_qty = 0
@@ -1228,6 +1414,83 @@ class ScalpingExecutor:
         self._cooldown_start = None
         self._price_tracker.reset()
         self._transition(ScalpingState.IDLE)
+
+    # ── DB 저장 헬퍼 ──────────────────────────────────────────
+
+    def _save_order_to_db(
+        self,
+        order_id: str,
+        side: str,
+        quantity: int,
+        price: int,
+        order_type: str = "limit",
+    ) -> None:
+        """스캘핑 주문 DB 저장"""
+        if not self._db:
+            return
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with self._db.get_cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO orders
+                    (order_id, stock_code, stock_name, side, order_type,
+                     quantity, price, filled_quantity, filled_price,
+                     status, strategy_name, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 'submitted', ?, ?, ?)
+                    """,
+                    (
+                        order_id,
+                        self._stock_code,
+                        self._stock_name,
+                        side,
+                        order_type,
+                        quantity,
+                        price,
+                        self._strategy_name,
+                        now,
+                        now,
+                    ),
+                )
+        except Exception as e:
+            logger.warning(f"[scalping] 주문 DB 저장 실패: {e}")
+
+    def _update_order_fill_in_db(
+        self,
+        order_id: str,
+        filled_qty: int,
+        filled_price: int,
+        pnl: Optional[int] = None,
+        avg_cost: Optional[float] = None,
+        pnl_rate: Optional[float] = None,
+    ) -> None:
+        """주문 체결 정보 DB 업데이트"""
+        if not self._db or not order_id:
+            return
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            with self._db.get_cursor() as cursor:
+                cursor.execute(
+                    """
+                    UPDATE orders SET
+                        filled_quantity = ?, filled_price = ?,
+                        status = 'filled',
+                        pnl = ?, avg_cost = ?, pnl_rate = ?,
+                        updated_at = ?
+                    WHERE order_id = ?
+                    """,
+                    (
+                        filled_qty,
+                        filled_price,
+                        pnl,
+                        avg_cost,
+                        pnl_rate,
+                        now,
+                        order_id,
+                    ),
+                )
+        except Exception as e:
+            logger.warning(f"[scalping] 주문 체결 DB 업데이트 실패: {e}")
 
     def _transition(self, new_state: ScalpingState) -> None:
         """상태 전환 (로그 포함)"""

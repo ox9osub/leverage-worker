@@ -571,6 +571,7 @@ class TradingEngine:
                             ws_client=self._ws_client,
                             slack_notifier=self._slack,
                             position_manager=self._position_manager,
+                            trading_db=self._trading_db,
                         )
                         self._scalping_executors[key] = executor
                         logger.info(

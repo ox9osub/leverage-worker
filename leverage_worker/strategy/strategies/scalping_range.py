@@ -9,7 +9,7 @@
     trading_end: 작동 종료 시간 (기본 "15:15")
     timeframe_minutes: 타임프레임 분 단위 (기본 3)
     candle_elapsed_seconds: 봉 시작 후 경과 시간, -1이면 즉시 (기본 -1)
-    dip_threshold_pct: 시가 대비 하락폭 % (기본 0.3)
+    dip_threshold_pct: 시가 대비 하락폭 % (기본 0.2)
     position_size: 매수 수량 (기본 1)
 
     # 스캘핑 실행 파라미터 (ScalpingExecutor로 전달)
@@ -70,7 +70,7 @@ class ScalpingRangeStrategy(BaseStrategy):
         self._candle_elapsed_seconds: int = self.get_param("candle_elapsed_seconds", -1)
 
         # 진입 조건
-        self._dip_threshold_pct: float = self.get_param("dip_threshold_pct", 0.3) / 100
+        self._dip_threshold_pct: float = self.get_param("dip_threshold_pct", 0.2) / 100
 
         # 포지션 설정
         self._position_size: int = self.get_param("position_size", 1)

@@ -26,16 +26,16 @@ class AdaptiveBoundaryTracker:
 
     def __init__(
         self,
-        boundary_window_ticks: int = 15,
+        boundary_window_ticks: int = 45,
         max_boundary_breaches: int = 5,
         min_consecutive_downticks: int = 3,
         dip_margin_pct: float = 0.1,
         lower_history_size: int = 3,
         min_boundary_range_pct: float = 0.001,
-        max_boundary_range_pct: float = 0.0015,
-        boundary_hold_seconds: float = 1.0,
+        max_boundary_range_pct: float = 0.002,
+        boundary_hold_seconds: float = 0.7,
         boundary_window_seconds: float = 1.0,
-        percentile_threshold: float = 10.0,
+        percentile_threshold: float = 20.0,
     ) -> None:
         """
         Args:
@@ -187,6 +187,22 @@ class AdaptiveBoundaryTracker:
             )
             return sorted_ticks[idx]
 
+    def get_percentile_price(self, percentile: float) -> Optional[int]:
+        """바운더리 틱의 N-th percentile 가격 반환
+
+        Args:
+            percentile: 0~100 사이의 퍼센타일 값 (예: 20.0 = P20)
+
+        Returns:
+            해당 퍼센타일 가격, 틱 없으면 None
+        """
+        with self._lock:
+            if len(self._ticks) == 0:
+                return None
+            sorted_ticks = sorted(t[1] for t in self._ticks)
+            idx = max(0, int(len(sorted_ticks) * percentile / 100.0) - 1)
+            return sorted_ticks[idx]
+
     def is_trading_allowed(self) -> bool:
         """
         거래 허용 여부 (최대 breach 횟수 체크)
@@ -275,3 +291,9 @@ class AdaptiveBoundaryTracker:
         self._range_qualified_at = None
         self._dip_fired = False
         logger.debug("[boundary] 바운더리 리셋 (새 윈도우 시작)")
+
+    def reset_for_new_cycle(self) -> None:
+        """사이클 간 리셋 (DIP/바운더리만 초기화, 틱/breach 유지)"""
+        with self._lock:
+            self._reset_boundary()
+            logger.debug("[boundary] 사이클 리셋 (DIP/바운더리 초기화)")

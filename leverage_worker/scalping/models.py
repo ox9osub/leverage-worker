@@ -44,7 +44,7 @@ class ScalpingConfig:
 
     # 주문 관리
     buy_timeout_seconds: int = 10  # 매수 미체결 타임아웃
-    max_cycles: int = 20  # 시그널당 최대 반복 횟수
+    max_cycles: int = 1  # 시그널당 최대 반복 횟수
     cooldown_seconds: float = 1.0  # 사이클 간 쿨다운
     min_ticks_for_trade: int = 10  # 최소 tick 수
 
@@ -62,6 +62,7 @@ class ScalpingConfig:
     max_boundary_range_pct: float = 0.0015  # 바운더리 최대 range (0.15%)
     boundary_hold_seconds: float = 1.0      # range 유지 시간 (초)
     boundary_window_seconds: float = 1.0   # 바운더리 시간 윈도우 (초, 틱 수와 OR 조건)
+    dip_from_signal_pct: float = 0.001     # P20이 시그널가 대비 최소 하락률 (0.1%)
 
     @classmethod
     def from_params(cls, params: Dict[str, Any]) -> "ScalpingConfig":
@@ -80,7 +81,7 @@ class ScalpingConfig:
             take_profit_pct=params.get("take_profit_pct", 0.003),
             max_signal_minutes=params.get("max_signal_minutes", 60),
             buy_timeout_seconds=params.get("buy_timeout_seconds", 10),
-            max_cycles=params.get("max_cycles", 20),
+            max_cycles=params.get("max_cycles", 1),
             cooldown_seconds=params.get("cooldown_seconds", 1.0),
             min_ticks_for_trade=params.get("min_ticks_for_trade", 10),
             trend_filter_enabled=params.get("trend_filter_enabled", True),
@@ -95,6 +96,7 @@ class ScalpingConfig:
             max_boundary_range_pct=params.get("max_boundary_range_pct", 0.0015),
             boundary_hold_seconds=params.get("boundary_hold_seconds", 1.0),
             boundary_window_seconds=params.get("boundary_window_seconds", 1.0),
+            dip_from_signal_pct=params.get("dip_from_signal_pct", 0.001),
         )
 
 

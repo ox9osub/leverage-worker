@@ -41,7 +41,7 @@ class DipBuyStrategy(BaseStrategy):
         trading_end: 작동 종료 시간 (기본 "09:45")
         timeframe_minutes: 타임프레임 분 단위 (기본 3)
         candle_elapsed_seconds: 봉 시작 후 경과 시간, -1이면 즉시 (기본 -1)
-        dip_threshold_pct: 시가 대비 하락폭 % (기본 0.3)
+        dip_threshold_pct: 시가 대비 하락폭 % (기본 0.2)
         take_profit_pct: 목표 수익률 % (기본 0.2)
         max_holding_bars: 최대 보유 기간 (N분봉 기준) (기본 60)
         stop_loss_pct: 손절 비율 % (기본 2.0)
@@ -64,7 +64,7 @@ class DipBuyStrategy(BaseStrategy):
         self._candle_elapsed_seconds = self.get_param("candle_elapsed_seconds", -1)
 
         # 진입 조건
-        self._dip_threshold_pct = self.get_param("dip_threshold_pct", 0.3) / 100
+        self._dip_threshold_pct = self.get_param("dip_threshold_pct", 0.2) / 100
 
         # 청산 조건
         self._take_profit_pct = self.get_param("take_profit_pct", 0.2) / 100
