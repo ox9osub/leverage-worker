@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
+    from leverage_worker.notification.daily_report import DailyReportGenerator
     from leverage_worker.trading.position_manager import PositionManager
     from leverage_worker.websocket.ws_client import RealtimeWSClient
 
@@ -69,6 +70,7 @@ class ScalpingExecutor:
         slack_notifier: Optional[SlackNotifier] = None,
         position_manager: Optional["PositionManager"] = None,
         trading_db: Optional["TradingDatabase"] = None,
+        report_generator: Optional["DailyReportGenerator"] = None,
     ) -> None:
         self._stock_code = stock_code
         self._stock_name = stock_name
@@ -80,6 +82,7 @@ class ScalpingExecutor:
         self._slack = slack_notifier
         self._position_manager = position_manager
         self._db = trading_db
+        self._report_generator = report_generator
 
         # 상태
         self._state = ScalpingState.IDLE
@@ -219,11 +222,25 @@ class ScalpingExecutor:
             - MONITORING: 즉시 시그널 만료
             - BUY_PENDING: 매수 주문 취소 + 시그널 만료
             - POSITION_HELD: 매수 주문 취소 + 포지션 시장가 매도
-            - SELL_PENDING: 변경 없음 (이미 매도 진행 중)
+            - SELL_PENDING: 매도 주문 취소 + 시장가 매도
         """
         with self._lock:
+            # 사유에 따른 메시지 분류
+            if "익절" in reason:
+                signal_type = "전략 익절"
+                emoji = "📈"
+            elif "손절" in reason:
+                signal_type = "전략 손절"
+                emoji = "📉"
+            elif "반전" in reason or "하락" in reason or "SHORT" in reason.upper():
+                signal_type = "SHORT 반전"
+                emoji = "🔻"
+            else:
+                signal_type = "청산 시그널"
+                emoji = "⚠️"
+
             logger.warning(
-                f"[scalping][{self._stock_name}] SHORT 시그널 감지: "
+                f"[scalping][{self._stock_name}] {signal_type} 감지: "
                 f"가격={short_price:,}원, 사유={reason}, 상태={self._state.value}"
             )
 
@@ -231,7 +248,7 @@ class ScalpingExecutor:
             if self._slack:
                 try:
                     self._slack.send_message(
-                        f"⚠️ [{self._stock_name}] SHORT 반전 감지\n"
+                        f"{emoji} [{self._stock_name}] {signal_type}\n"
                         f"• 가격: {short_price:,}원\n"
                         f"• 사유: {reason}\n"
                         f"• 조치: 즉시 청산 ({self._state.value})"
@@ -241,14 +258,14 @@ class ScalpingExecutor:
 
             if self._state == ScalpingState.MONITORING:
                 # DIP 바운더리 찾는 중 → 즉시 종료
-                self._handle_signal_expired(f"SHORT 반전: {reason}", short_price)
+                self._handle_signal_expired(f"{signal_type}: {reason}", short_price)
 
             elif self._state == ScalpingState.BUY_PENDING:
                 # 매수 주문 대기 중 → 주문 취소 후 종료
                 if self._buy_order_id:
                     self._cancel_buy_order()
                     self._clear_buy_order()
-                self._handle_signal_expired(f"SHORT 반전: {reason}", short_price)
+                self._handle_signal_expired(f"{signal_type}: {reason}", short_price)
 
             elif self._state == ScalpingState.POSITION_HELD:
                 # 부분 체결 상태 → 주문 취소 + 포지션 매도
@@ -268,11 +285,24 @@ class ScalpingExecutor:
 
                 # 포지션 시장가 매도
                 if self._held_qty > 0:
-                    self._market_sell_all(f"SHORT 반전: {reason}")
+                    self._market_sell_all(f"{signal_type}: {reason}")
                 else:
-                    self._handle_signal_expired(f"SHORT 반전: {reason}", short_price)
+                    self._handle_signal_expired(f"{signal_type}: {reason}", short_price)
 
-            # SELL_PENDING, STOP_LOSS, COOLDOWN은 무시 (이미 종료 과정 중)
+            elif self._state == ScalpingState.SELL_PENDING:
+                # 매도 주문 대기 중 → 기존 주문 취소 + 시장가 매도
+                if self._sell_order_id:
+                    self._cancel_sell_order()
+                    self._clear_sell_order()
+
+                # 포지션이 남아있으면 시장가 매도
+                if self._held_qty > 0:
+                    self._market_sell_all(f"{signal_type}: {reason}")
+                else:
+                    self._log_signal_summary()
+                    self._reset_to_idle()
+
+            # COOLDOWN은 무시 (이미 종료 과정 중)
 
     def on_tick(self, price: int, timestamp: datetime) -> None:
         """
@@ -298,8 +328,8 @@ class ScalpingExecutor:
             # DEPRECATED: old tracker tick (backward compatibility)
             self._price_tracker.add_tick(timestamp, price)
 
-            # 시그널 수명 만료 체크 (모든 활성 상태에서)
-            if self._signal_ctx:
+            # 시그널 수명 만료 체크 (SELL_PENDING 제외 - 이미 매도 진행 중)
+            if self._signal_ctx and self._state != ScalpingState.SELL_PENDING:
                 expired, reason = self._signal_ctx.is_expired(timestamp, price)
                 if expired:
                     self._handle_signal_expired(reason, price)
@@ -501,6 +531,16 @@ class ScalpingExecutor:
                     )
                 except Exception as e:
                     logger.warning(f"[scalping] Slack 알림 실패: {e}")
+
+            # Daily summary DB 업데이트
+            if self._report_generator:
+                try:
+                    report = self._report_generator.generate()
+                    self._report_generator.save_to_db(report)
+                    logger.info(f"[scalping] Daily summary 업데이트: {report.realized_pnl:,}원")
+                except Exception as e:
+                    logger.warning(f"[scalping] Daily summary 업데이트 실패: {e}")
+
             return True
 
         # === Partial sell ===
@@ -978,6 +1018,61 @@ class ScalpingExecutor:
                 except Exception as e:
                     logger.warning(f"[scalping] Slack 알림 실패: {e}")
 
+            # Daily summary DB 업데이트
+            if self._report_generator:
+                try:
+                    report = self._report_generator.generate()
+                    self._report_generator.save_to_db(report)
+                    logger.info(f"[scalping] Daily summary 업데이트: {report.realized_pnl:,}원")
+                except Exception as e:
+                    logger.warning(f"[scalping] Daily summary 업데이트 실패: {e}")
+
+        elif filled_qty > 0 and filled_qty > self._sold_qty:
+            # Partial sell fill via REST (부분 체결)
+
+            # 체결가 결정
+            if self._sell_order_price > 0:
+                sell_price = self._sell_order_price
+            else:
+                sell_price = price
+
+            # 이번에 새로 확인된 체결량 (REST는 누적값이므로 차이 계산)
+            new_fills = filled_qty - self._sold_qty
+
+            # PnL 계산 및 상태 업데이트 (WS 로직과 동일)
+            fill_pnl = int((sell_price - self._held_avg_price) * new_fills)
+            self._sold_pnl += fill_pnl
+            self._held_qty = max(self._held_qty - new_fills, 0)
+            self._sold_qty = filled_qty  # REST는 누적값으로 설정
+
+            logger.info(
+                f"[REST 폴백] 부분 매도: {new_fills}주 @ {sell_price:,}원 "
+                f"(누적 {self._sold_qty}/{self._sell_order_qty}주)"
+            )
+
+            # DB 업데이트
+            self._update_order_fill_in_db(
+                self._sell_order_id, self._sold_qty, sell_price,
+                pnl=self._sold_pnl, avg_cost=self._held_avg_price,
+                pnl_rate=((sell_price / self._held_avg_price) - 1) * 100 if self._held_avg_price > 0 else 0.0,
+            )
+
+            # Slack 알림 - 부분 매도
+            if self._slack:
+                try:
+                    self._slack.notify_fill(
+                        fill_type="SELL",
+                        stock_code=self._stock_code,
+                        stock_name=self._stock_name,
+                        quantity=new_fills,
+                        price=sell_price,
+                        strategy_name=self._strategy_name,
+                        total_filled=self._sold_qty,
+                        order_quantity=self._sell_order_qty,
+                    )
+                except Exception:
+                    pass
+
     def _handle_cooldown(self, price: int, timestamp: datetime) -> None:
         """
         COOLDOWN: 즉시 MONITORING 복귀 (NEW)
@@ -1396,6 +1491,10 @@ class ScalpingExecutor:
 
     def _reset_to_idle(self) -> None:
         """IDLE 상태로 리셋"""
+        # Slack dedup 초기화: 다음 시그널 알림 허용
+        if self._slack:
+            self._slack.reset_signal_for_key(self._stock_code, self._strategy_name)
+
         # EC-6: 보유 포지션이 있으면 시장가 매도 후 종료
         if self._held_qty > 0:
             logger.warning(

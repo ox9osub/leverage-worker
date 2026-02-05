@@ -256,25 +256,27 @@ class MLPricePositionStrategy(BaseStrategy):
             candle_high = latest_candle.high_price
             candle_low = latest_candle.low_price
 
-        # 손절 (우선 확인) - 분봉 저가가 SL 이하면 손절
+        # 손절 조건 (분봉 저가가 SL 이하)
         if candle_low <= sl_price:
-            sl_rate = (candle_low - avg_price) / avg_price
+            current_rate = (context.current_price - avg_price) / avg_price
+            label = "익절" if current_rate >= 0 else "손절"
             self._entry_time = None
             return TradingSignal.sell(
                 stock_code=stock_code,
                 quantity=context.position_quantity,
-                reason=f"손절: {sl_rate:.2%} (저가 {candle_low:,} <= SL {sl_price:,.0f})",
+                reason=f"{label}: {current_rate:.2%}",
                 confidence=1.0,
             )
 
-        # 익절 - 분봉 고가가 TP 이상이면 익절
+        # 익절 조건 (분봉 고가가 TP 이상)
         if candle_high >= tp_price:
-            tp_rate = (candle_high - avg_price) / avg_price
+            current_rate = (context.current_price - avg_price) / avg_price
+            label = "익절" if current_rate >= 0 else "손절"
             self._entry_time = None
             return TradingSignal.sell(
                 stock_code=stock_code,
                 quantity=context.position_quantity,
-                reason=f"익절: {tp_rate:.2%} (고가 {candle_high:,} >= TP {tp_price:,.0f})",
+                reason=f"{label}: {current_rate:.2%}",
                 confidence=1.0,
             )
 
