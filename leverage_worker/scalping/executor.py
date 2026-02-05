@@ -202,8 +202,8 @@ class ScalpingExecutor:
                         strategy_name=self._strategy_name,
                         reason=(
                             f"스캘핑 시작 "
-                            f"(TP={self._signal_ctx.tp_price:,}원/{tp_pct*100:.1f}%, "
-                            f"SL={self._signal_ctx.sl_price:,}원/{sl_pct*100:.1f}%)"
+                            f"(TP=*{self._signal_ctx.tp_price:,}원*/{tp_pct*100:.1f}%, "
+                            f"SL=*{self._signal_ctx.sl_price:,}원*/{sl_pct*100:.1f}%)"
                         ),
                         strategy_win_rate=None,
                     )
@@ -1093,10 +1093,18 @@ class ScalpingExecutor:
             if self._slack and self._signal_ctx:
                 try:
                     ctx = self._signal_ctx
+                    # 오늘 전체 손익 조회
+                    daily_pnl = ctx.total_pnl
+                    if self._report_generator:
+                        try:
+                            report = self._report_generator.generate()
+                            daily_pnl = report.realized_pnl
+                        except Exception:
+                            pass
                     self._slack.send_message(
                         f"[{self._stock_name}] 스캘핑 거래 완료\n"
+                        f"• 당일 누적 손익: *{daily_pnl:,}원*\n"
                         f"• 완료 사이클: {ctx.cycle_count}/{self._config.max_cycles}회\n"
-                        f"• 누적 손익: {ctx.total_pnl:,}원\n"
                         f"• 다음 시그널 대기 중"
                     )
                 except Exception:

@@ -175,7 +175,7 @@ class SlackNotifier:
             strategy_display = f"{strategy_name}({strategy_win_rate:.1f}%)"
 
         lines = [
-            f"{self._get_mode_prefix()}[매수 주문 완료] {stock_name}({stock_code}) / {quantity}주 / {price:,}원 / {total_amount:,}원",
+            f"{self._get_mode_prefix()}[매수 주문 완료] {stock_name}({stock_code}) / {quantity}주 / *{price:,}원* / {total_amount:,}원",
             f"전략: {strategy_display}" + (f" / {reason}" if reason else ""),
             timestamp,
         ]
@@ -364,7 +364,7 @@ class SlackNotifier:
 
         lines = [
             first_line,
-            f"{stock_name}({stock_code}) / {quantity}주 / {price:,}원 / {total_amount:,}원",
+            f"{stock_name}({stock_code}) / {quantity}주 / *{price:,}원* / *{total_amount:,}원*",
         ]
 
         # 분할 체결 상세 표시
@@ -375,7 +375,7 @@ class SlackNotifier:
         if not is_buy:
             pnl_sign = "+" if profit_loss >= 0 else ""
             rate_sign = "+" if profit_rate >= 0 else ""
-            lines.append(f"손익: {pnl_sign}{profit_loss:,}원 ({rate_sign}{profit_rate:.2f}%)")
+            lines.append(f"손익: *{pnl_sign}{profit_loss:,}원* ({rate_sign}{profit_rate:.2f}%)")
 
         lines.append(f"전략: {strategy_display}")
 
@@ -503,48 +503,78 @@ class SlackNotifier:
             성공 여부
         """
         date = report.get("date", datetime.now().strftime("%Y-%m-%d"))
-        total_trades = report.get("total_trades", 0)
-        buy_trades = report.get("buy_trades", 0)
-        sell_trades = report.get("sell_trades", 0)
         realized_pnl = report.get("realized_pnl", 0)
-        win_trades = report.get("win_trades", 0)
-        lose_trades = report.get("lose_trades", 0)
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        win_rate = 0
-        if sell_trades > 0:
-            win_rate = (win_trades / sell_trades) * 100
+        # 개별 거래 내역
+        trades = report.get("trades", [])
+
+        # 거래를 B/S 쌍으로 그룹화
+        paired_trades = self._pair_trades(trades)
+
+        # 쌍 기준으로 통계 계산
+        pair_count = 0  # 완성된 B/S 쌍 개수
+        buy_only_count = 0  # 매수만 있는 경우
+        sell_only_count = 0  # 매도만 있는 경우
+        win_count = 0
+        lose_count = 0
+
+        for pair in paired_trades:
+            buy_trade = pair.get("buy")
+            sell_trade = pair.get("sell")
+
+            if buy_trade and sell_trade:
+                pair_count += 1
+                pnl = sell_trade.get("profit_loss", 0)
+                if pnl > 0:
+                    win_count += 1
+                elif pnl < 0:
+                    lose_count += 1
+            elif buy_trade:
+                buy_only_count += 1
+            elif sell_trade:
+                sell_only_count += 1
+                pnl = sell_trade.get("profit_loss", 0)
+                if pnl > 0:
+                    win_count += 1
+                elif pnl < 0:
+                    lose_count += 1
+
+        total_sets = pair_count + sell_only_count  # 손익 확정된 세트
+        win_rate = (win_count / total_sets * 100) if total_sets > 0 else 0
 
         pnl_sign = "+" if realized_pnl >= 0 else ""
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
         lines = [
             f"{self._get_mode_prefix()}[일일리포트] {date}",
-            f"총거래: {total_trades}건 (매수 {buy_trades} / 매도 {sell_trades})",
-            f"실현손익: {pnl_sign}{realized_pnl:,}원",
-            f"승률: {win_rate:.1f}% ({win_trades}승 {lose_trades}패)",
+            f"총거래: {pair_count}세트 (미체결 매수: {buy_only_count})",
+            f"실현손익: *{pnl_sign}{realized_pnl:,}원*",
+            f"승률: {win_rate:.1f}% ({win_count}승 {lose_count}패)",
         ]
 
-        # 개별 거래 내역 (있으면)
-        trades = report.get("trades", [])
-        if trades:
+        # 개별 거래 내역 표시
+        if paired_trades:
             lines.append("---")
-
-            # 거래를 B/S 쌍으로 그룹화
-            paired_trades = self._pair_trades(trades)
 
             for pair in paired_trades:
                 buy_trade = pair.get("buy")
                 sell_trade = pair.get("sell")
 
                 if buy_trade and sell_trade:
-                    # 쌍이 매칭된 경우
+                    # 쌍이 매칭된 경우 - 손익 표시
                     buy_time = self._extract_time_str(buy_trade.get("order_time", ""))
                     sell_time = self._extract_time_str(sell_trade.get("order_time", ""))
                     stock_name = buy_trade["stock_name"]
 
+                    # 손익 계산 (sell에 저장된 값 사용)
+                    pnl = sell_trade.get("profit_loss", 0)
+                    pnl_sign = "+" if pnl >= 0 else ""
+                    result_emoji = "⬆" if pnl > 0 else "⬇" if pnl < 0 else "➡"
+
                     lines.append(
                         f"[{buy_time}] B {buy_trade['quantity']}주 @ {buy_trade['price']:,}원 / "
-                        f"[{sell_time}] S {sell_trade['quantity']}주 @ {sell_trade['price']:,}원 ({stock_name})"
+                        f"[{sell_time}] S {sell_trade['quantity']}주 @ {sell_trade['price']:,}원 "
+                        f"= {pnl_sign}{pnl:,}원 {result_emoji} ({stock_name})"
                     )
                 elif buy_trade:
                     # 매수만 있는 경우
@@ -555,8 +585,12 @@ class SlackNotifier:
                 elif sell_trade:
                     # 매도만 있는 경우
                     time_str = self._extract_time_str(sell_trade.get("order_time", ""))
+                    pnl = sell_trade.get("profit_loss", 0)
+                    pnl_sign = "+" if pnl >= 0 else ""
+                    result_emoji = "⬆" if pnl > 0 else "⬇" if pnl < 0 else "➡"
                     lines.append(
-                        f"[{time_str}] S {sell_trade['quantity']}주 @ {sell_trade['price']:,}원 ({sell_trade['stock_name']})"
+                        f"[{time_str}] S {sell_trade['quantity']}주 @ {sell_trade['price']:,}원 "
+                        f"= {pnl_sign}{pnl:,}원 {result_emoji} ({sell_trade['stock_name']})"
                     )
 
         # 보유 포지션 (있으면)

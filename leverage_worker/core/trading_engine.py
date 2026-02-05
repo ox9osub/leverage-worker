@@ -1780,7 +1780,7 @@ class TradingEngine:
                 f"✅ [청산완료] {result.successful_orders}/{result.total_positions} 성공\n"
                 f"━━━━━━━━━━━━━━━━━━━\n"
                 f"💰 총 청산금액: {result.total_liquidation_value:,}원\n"
-                f"📈 실현손익: {result.total_pnl:+,}원 "
+                f"📈 실현손익: *{result.total_pnl:+,}원* "
                 f"({result.total_pnl / result.total_liquidation_value * 100:+.2f}%)\n"
                 f"⏱️ 소요시간: {duration:.1f}초"
             )
