@@ -442,6 +442,56 @@ class SlackNotifier:
 
         return self.send_message("\n".join(lines))
 
+
+
+    def _extract_time_str(self, order_time: Any) -> str:
+        """거래 시간에서 HH:MM:SS 문자열 추출"""
+        if not order_time:
+            return ""
+        if hasattr(order_time, "strftime"):
+            return order_time.strftime("%H:%M:%S")
+        # 문자열인 경우 "YYYY-MM-DD HH:MM:SS" 형식에서 시간 추출
+        time_str = str(order_time)
+        return time_str[11:19] if len(time_str) >= 19 else ""
+
+    def _pair_trades(self, trades: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        거래를 B/S 쌍으로 그룹화
+
+        Args:
+            trades: 시간순 정렬된 거래 리스트
+
+        Returns:
+            쌍으로 그룹화된 거래 리스트. 각 항목은 {"buy": ..., "sell": ...} 형태
+        """
+        result = []
+        used: set[int] = set()
+
+        for i, t in enumerate(trades):
+            if i in used:
+                continue
+
+            if t["side"] == "buy":
+                # 다음 동일 종목 sell 찾기
+                sell_match = None
+                for j in range(i + 1, len(trades)):
+                    if (
+                        j not in used
+                        and trades[j]["side"] == "sell"
+                        and trades[j]["stock_code"] == t["stock_code"]
+                    ):
+                        sell_match = trades[j]
+                        used.add(j)
+                        break
+
+                result.append({"buy": t, "sell": sell_match})
+            else:
+                result.append({"buy": None, "sell": t})
+
+            used.add(i)
+
+        return result
+
     def send_daily_report(self, report: Dict[str, Any]) -> bool:
         """
         일일 리포트 전송
@@ -478,34 +528,35 @@ class SlackNotifier:
         trades = report.get("trades", [])
         if trades:
             lines.append("---")
-            for t in trades:
-                # 거래 시간 추출 (HH:MM:SS)
-                order_time = t.get("order_time", "")
-                if order_time:
-                    # datetime 객체인 경우와 문자열인 경우 모두 처리
-                    if hasattr(order_time, "strftime"):
-                        time_str = order_time.strftime("%H:%M:%S")
-                    else:
-                        # 문자열인 경우 "YYYY-MM-DD HH:MM:SS" 형식에서 시간 추출
-                        time_str = str(order_time)[11:19] if len(str(order_time)) >= 19 else ""
-                else:
-                    time_str = ""
 
-                time_prefix = f"[{time_str}] " if time_str else ""
+            # 거래를 B/S 쌍으로 그룹화
+            paired_trades = self._pair_trades(trades)
 
-                if t["side"] == "sell":
-                    pnl = t.get("profit_loss", 0)
-                    rate = t.get("profit_rate", 0.0)
-                    pnl_sign = "+" if pnl >= 0 else ""
+            for pair in paired_trades:
+                buy_trade = pair.get("buy")
+                sell_trade = pair.get("sell")
+
+                if buy_trade and sell_trade:
+                    # 쌍이 매칭된 경우
+                    buy_time = self._extract_time_str(buy_trade.get("order_time", ""))
+                    sell_time = self._extract_time_str(sell_trade.get("order_time", ""))
+                    stock_name = buy_trade["stock_name"]
+
                     lines.append(
-                        f"{time_prefix}{t['stock_name']} sell {t['quantity']}주 "
-                        f"@ {t['price']:,}원 ({pnl_sign}{pnl:,}원, {pnl_sign}{rate:.2f}%)"
+                        f"[{buy_time}] B {buy_trade['quantity']}주 @ {buy_trade['price']:,}원 / "
+                        f"[{sell_time}] S {sell_trade['quantity']}주 @ {sell_trade['price']:,}원 ({stock_name})"
                     )
-                else:
-                    strategy = t.get("strategy_name", "")
-                    strategy_suffix = f" ({strategy})" if strategy else ""
+                elif buy_trade:
+                    # 매수만 있는 경우
+                    time_str = self._extract_time_str(buy_trade.get("order_time", ""))
                     lines.append(
-                        f"{time_prefix}{t['stock_name']} buy {t['quantity']}주 @ {t['price']:,}원{strategy_suffix}"
+                        f"[{time_str}] B {buy_trade['quantity']}주 @ {buy_trade['price']:,}원 ({buy_trade['stock_name']})"
+                    )
+                elif sell_trade:
+                    # 매도만 있는 경우
+                    time_str = self._extract_time_str(sell_trade.get("order_time", ""))
+                    lines.append(
+                        f"[{time_str}] S {sell_trade['quantity']}주 @ {sell_trade['price']:,}원 ({sell_trade['stock_name']})"
                     )
 
         # 보유 포지션 (있으면)
