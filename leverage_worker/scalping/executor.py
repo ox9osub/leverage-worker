@@ -1266,6 +1266,15 @@ class ScalpingExecutor:
                     pnl=self._sold_pnl, avg_cost=self._held_avg_price, pnl_rate=0.0,
                 )
                 self._record_cycle_complete(self._sold_pnl)
+
+                # DailyReport 업데이트 (강제 매도 손익 반영)
+                if self._report_generator:
+                    try:
+                        report = self._report_generator.generate()
+                        self._report_generator.save_to_db(report)
+                    except Exception as e:
+                        logger.warning(f"[scalping] Daily summary 업데이트 실패: {e}")
+
                 self._clear_position()
                 self._clear_sell_order()
                 self._log_signal_summary()
@@ -1394,9 +1403,37 @@ class ScalpingExecutor:
                 additional_pnl = int((sell_price - self._held_avg_price) * new_fills)
                 self._sold_pnl += additional_pnl
                 self._held_qty = max(self._held_qty - new_fills, 0)
+                self._sold_qty = filled_qty  # sold_qty 동기화
+
+            # orders 테이블 업데이트 (_clear_sell_order 전에!)
+            if filled_qty > 0 and self._sell_order_id:
+                sell_price = self._sell_order_price if self._sell_order_price > 0 else self._held_avg_price
+                pnl_rate = ((sell_price / self._held_avg_price) - 1) * 100 if self._held_avg_price > 0 else 0.0
+                self._update_order_fill_in_db(
+                    self._sell_order_id,
+                    filled_qty,
+                    sell_price,
+                    pnl=self._sold_pnl,
+                    avg_cost=self._held_avg_price,
+                    pnl_rate=pnl_rate,
+                )
+
             # 전체 매도 PnL을 signal_ctx에 기록
             if self._signal_ctx and self._sold_pnl != 0:
                 self._signal_ctx.total_pnl += self._sold_pnl
+
+            # DailyReport 업데이트 (orders 업데이트 후)
+            if self._report_generator and self._sold_pnl != 0:
+                try:
+                    report = self._report_generator.generate()
+                    self._report_generator.save_to_db(report)
+                except Exception as e:
+                    logger.warning(f"[scalping] Daily summary 업데이트 실패: {e}")
+
+            # 포지션 0이면 PositionManager 동기화
+            if self._held_qty == 0:
+                self._clear_position()
+
             self._clear_sell_order()
 
     # ──────────────────────────────────────────
