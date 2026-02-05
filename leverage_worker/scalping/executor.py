@@ -119,6 +119,8 @@ class ScalpingExecutor:
         self._sell_order_branch: Optional[str] = None
         self._sell_order_price: int = 0
         self._sell_order_qty: int = 0
+        self._sell_order_time: Optional[datetime] = None  # 매도 주문 시간
+        self._last_sell_fill_time: Optional[datetime] = None  # 마지막 매도 체결 시간
 
         # 매도 체결 누적 추적
         self._sold_qty: int = 0          # 현재 매도 주문 누적 체결 수량
@@ -485,6 +487,7 @@ class ScalpingExecutor:
 
         # 누적 업데이트
         self._sold_qty += actual_fill
+        self._last_sell_fill_time = datetime.now()  # 마지막 체결 시간 갱신
 
         # 이번 체결분 PnL
         fill_pnl = int((filled_price - self._held_avg_price) * actual_fill)
@@ -933,6 +936,32 @@ class ScalpingExecutor:
                 self._cooldown_start = timestamp
             return
 
+        # 매도 타임아웃 체크 (체결 없으면 시장가 전환)
+        if self._sell_order_time:
+            timeout_sec = self._config.sell_timeout_seconds
+            # 기준 시간: 마지막 체결 시간 또는 주문 시간
+            reference_time = self._last_sell_fill_time or self._sell_order_time
+            elapsed = (timestamp - reference_time).total_seconds()
+
+            # 잔여 수량이 있고 타임아웃 경과
+            remaining = self._sell_order_qty - self._sold_qty
+            if remaining > 0 and elapsed >= timeout_sec:
+                if self._sold_qty == 0:
+                    reason = f"매도 타임아웃: {elapsed:.0f}초 체결 없음"
+                else:
+                    reason = f"부분체결 후 타임아웃: {elapsed:.0f}초 추가 체결 없음 (잔여 {remaining}주)"
+
+                logger.warning(f"[scalping][{self._stock_name}] {reason} → 시장가 전환")
+
+                # 부분 매도 PnL 보존 후 주문 정리
+                saved_sold_pnl = self._sold_pnl
+                self._cancel_sell_order()
+                self._clear_sell_order()
+                self._sold_pnl = saved_sold_pnl  # 부분 매도 PnL 복원
+
+                self._market_sell_all(reason)
+                return
+
         # SL 체크 (매 틱, API 호출 없음)
         if self._signal_ctx and price <= self._signal_ctx.sl_price:
             logger.warning(f"[scalping] 매도 대기 중 SL 도달 → 시장가 전환")
@@ -981,6 +1010,7 @@ class ScalpingExecutor:
                 self._sold_pnl += new_pnl
                 self._held_qty = max(self._held_qty - new_fills, 0)
                 self._sold_qty = filled_qty
+                self._last_sell_fill_time = timestamp  # 마지막 체결 시간 갱신
 
             total_pnl = self._sold_pnl
             profit_pct = ((sell_price / self._held_avg_price) - 1) * 100 if self._held_avg_price > 0 else 0.0
@@ -1044,6 +1074,7 @@ class ScalpingExecutor:
             self._sold_pnl += fill_pnl
             self._held_qty = max(self._held_qty - new_fills, 0)
             self._sold_qty = filled_qty  # REST는 누적값으로 설정
+            self._last_sell_fill_time = timestamp  # 마지막 체결 시간 갱신
 
             logger.info(
                 f"[REST 폴백] 부분 매도: {new_fills}주 @ {sell_price:,}원 "
@@ -1189,6 +1220,8 @@ class ScalpingExecutor:
             self._sell_order_branch = result.order_branch
             self._sell_order_price = sell_price
             self._sell_order_qty = self._held_qty
+            self._sell_order_time = datetime.now()  # 매도 주문 시간 기록
+            self._last_sell_fill_time = None  # 체결 시간 초기화
             self._last_order_check_time = None  # 첫 체결 확인 즉시 실행
             self._transition(ScalpingState.SELL_PENDING)
 
@@ -1294,6 +1327,8 @@ class ScalpingExecutor:
                 self._sell_order_branch = getattr(result, 'order_branch', None)
                 self._sell_order_price = 0  # 시장가
                 self._sell_order_qty = sell_qty
+                self._sell_order_time = datetime.now()  # 매도 주문 시간 기록
+                self._last_sell_fill_time = None  # 체결 시간 초기화
                 self._sold_qty = 0          # 새 주문의 누적 초기화
                 self._sold_pnl = saved_sold_pnl  # 이전 부분 매도 PnL 유지
                 self._last_order_check_time = None  # REST 즉시 확인 가능
@@ -1502,6 +1537,8 @@ class ScalpingExecutor:
         self._sell_order_branch = None
         self._sell_order_price = 0
         self._sell_order_qty = 0
+        self._sell_order_time = None
+        self._last_sell_fill_time = None
         self._sold_qty = 0
         self._sold_pnl = 0
 

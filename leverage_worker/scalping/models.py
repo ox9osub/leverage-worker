@@ -44,6 +44,7 @@ class ScalpingConfig:
 
     # 주문 관리
     buy_timeout_seconds: int = 10  # 매수 미체결 타임아웃
+    sell_timeout_seconds: int = 60  # 매도 미체결 타임아웃 (체결 없으면 시장가 전환)
     max_cycles: int = 1  # 시그널당 최대 반복 횟수
     cooldown_seconds: float = 1.0  # 사이클 간 쿨다운
     min_ticks_for_trade: int = 10  # 최소 tick 수
@@ -81,6 +82,7 @@ class ScalpingConfig:
             take_profit_pct=params.get("take_profit_pct", 0.003),
             max_signal_minutes=params.get("max_signal_minutes", 60),
             buy_timeout_seconds=params.get("buy_timeout_seconds", 10),
+            sell_timeout_seconds=params.get("sell_timeout_seconds", 60),
             max_cycles=params.get("max_cycles", 1),
             cooldown_seconds=params.get("cooldown_seconds", 1.0),
             min_ticks_for_trade=params.get("min_ticks_for_trade", 10),
