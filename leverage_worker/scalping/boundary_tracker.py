@@ -245,7 +245,7 @@ class AdaptiveBoundaryTracker:
 
     def _update_boundary(self) -> None:
         """
-        바운더리 갱신 (윈도우 full일 때만 호출)
+        바운더리 갱신 - 최근→과거로 윈도우 확장하여 0.2% 이하 최대 윈도우 탐색
 
         내부 메서드, lock 내부에서만 호출됨
         """
@@ -255,28 +255,55 @@ class AdaptiveBoundaryTracker:
         prev_lower = self._lower_boundary
         prev_upper = self._upper_boundary
 
-        prices = [t[1] for t in self._ticks]
-        self._upper_boundary = max(prices)
-        self._lower_boundary = min(prices)
+        # 최근 → 과거 순서로 틱 리스트 생성 (reversed)
+        ticks_recent_first = list(reversed(self._ticks))
 
-        # 하한 바운더리 히스토리 업데이트
-        self._lower_boundary_history.append(self._lower_boundary)
+        valid_upper: Optional[int] = None
+        valid_lower: Optional[int] = None
 
-        # 바운더리 확립/변경 로그
-        if prev_lower is None or prev_upper is None:
-            logger.info(
-                f"[boundary] 바운더리 확립: "
-                f"{self._lower_boundary:,}원 ~ {self._upper_boundary:,}원 "
-                f"({len(self._ticks)}틱)"
-            )
-        elif (
-            self._lower_boundary != prev_lower
-            or self._upper_boundary != prev_upper
-        ):
-            logger.debug(
-                f"[boundary] 바운더리 갱신: "
-                f"{self._lower_boundary:,}원 ~ {self._upper_boundary:,}원"
-            )
+        # 2틱부터 시작하여 과거로 확장
+        for i in range(2, len(ticks_recent_first) + 1):
+            window_prices = [t[1] for t in ticks_recent_first[:i]]
+
+            upper = max(window_prices)
+            lower = min(window_prices)
+            range_pct = (upper - lower) / lower if lower > 0 else 0
+
+            if range_pct > self._max_boundary_range_pct:
+                # 0.2% 초과 → 확장 중단, 직전 윈도우 사용
+                break
+
+            # 0.2% 이하 → 현재 윈도우를 유효로 저장
+            valid_upper = upper
+            valid_lower = lower
+
+        # 전체 확장해도 0.2% 안 넘으면 전체 사용
+        if valid_upper is None and self._ticks:
+            prices = [t[1] for t in self._ticks]
+            valid_upper = max(prices)
+            valid_lower = min(prices)
+
+        # 바운더리 설정
+        if valid_upper is not None and valid_lower is not None:
+            self._upper_boundary = valid_upper
+            self._lower_boundary = valid_lower
+            self._lower_boundary_history.append(self._lower_boundary)
+
+            # 바운더리 확립/변경 로그
+            if prev_lower is None or prev_upper is None:
+                logger.info(
+                    f"[boundary] 바운더리 확립: "
+                    f"{self._lower_boundary:,}원 ~ {self._upper_boundary:,}원 "
+                    f"({len(self._ticks)}틱)"
+                )
+            elif (
+                self._lower_boundary != prev_lower
+                or self._upper_boundary != prev_upper
+            ):
+                logger.debug(
+                    f"[boundary] 바운더리 갱신: "
+                    f"{self._lower_boundary:,}원 ~ {self._upper_boundary:,}원"
+                )
 
     def _reset_boundary(self) -> None:
         """

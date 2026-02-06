@@ -63,7 +63,7 @@ class ScalpingConfig:
     max_boundary_range_pct: float = 0.0015  # 바운더리 최대 range (0.15%)
     boundary_hold_seconds: float = 1.0      # range 유지 시간 (초)
     boundary_window_seconds: float = 1.0   # 바운더리 시간 윈도우 (초, 틱 수와 OR 조건)
-    dip_from_signal_pct: float = 0.001     # P20이 시그널가 대비 최소 하락률 (0.1%)
+    dip_from_signal_pct: float = 0.001     # 시그널가 대비 최소 하락률 (0.1%)
 
     @classmethod
     def from_params(cls, params: Dict[str, Any]) -> "ScalpingConfig":

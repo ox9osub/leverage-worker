@@ -9,7 +9,6 @@
     trading_end: 작동 종료 시간 (기본 "15:15")
     timeframe_minutes: 타임프레임 분 단위 (기본 3)
     candle_elapsed_seconds: 봉 시작 후 경과 시간, -1이면 즉시 (기본 -1)
-    dip_threshold_pct: 시가 대비 하락폭 % (기본 0.2)
     position_size: 매수 수량 (기본 1)
 
     # 스캘핑 실행 파라미터 (ScalpingExecutor로 전달)
@@ -69,9 +68,6 @@ class ScalpingRangeStrategy(BaseStrategy):
         self._timeframe_minutes: int = self.get_param("timeframe_minutes", 3)
         self._candle_elapsed_seconds: int = self.get_param("candle_elapsed_seconds", -1)
 
-        # 진입 조건
-        self._dip_threshold_pct: float = self.get_param("dip_threshold_pct", 0.2) / 100
-
         # 포지션 설정
         self._position_size: int = self.get_param("position_size", 1)
 
@@ -84,7 +80,6 @@ class ScalpingRangeStrategy(BaseStrategy):
         logger.info(
             f"[{name}] ScalpingRangeStrategy initialized: "
             f"timeframe={self._timeframe_minutes}min, "
-            f"dip={self._dip_threshold_pct*100:.2f}%, "
             f"sell_target={self._sell_profit_pct*100:.1f}%, "
             f"SL={self._stop_loss_pct*100:.1f}%, "
             f"TP={self._take_profit_pct*100:.1f}%, "
@@ -195,35 +190,21 @@ class ScalpingRangeStrategy(BaseStrategy):
         if not self._check_candle_elapsed(context.current_time, candle_start):
             return TradingSignal.hold(stock_code, "봉 경과 시간 미충족")
 
-        # 진입 조건: 시가 대비 하락폭 확인
+        # 시그널 생성 (하락률 체크는 executor의 dip_from_signal_pct에서 수행)
         if candle.open_price <= 0:
             return TradingSignal.hold(stock_code, "시가 데이터 없음")
 
         current_price = context.current_price
         open_price = candle.open_price
-        dip_rate = (open_price - current_price) / open_price
 
-        if dip_rate >= self._dip_threshold_pct:
-            logger.info(
-                f"[scalping_range][{stock_code}] 매수 시그널: "
-                f"시가({open_price:,}) 대비 하락 {dip_rate*100:.2f}% >= "
-                f"{self._dip_threshold_pct*100:.2f}%"
-            )
-
-            return TradingSignal.buy(
-                stock_code=stock_code,
-                quantity=self._position_size,
-                reason=(
-                    f"스캘핑 시그널: 시가({open_price:,}) 대비 "
-                    f"-{dip_rate*100:.2f}%"
-                ),
-                confidence=0.9,
-            )
-
-        logger.debug(
-            f"[scalping_range][{stock_code}] 매수 조건 미충족: "
-            f"하락률 {dip_rate*100:.2f}% < {self._dip_threshold_pct*100:.2f}%"
+        logger.info(
+            f"[scalping_range][{stock_code}] 매수 시그널: "
+            f"현재가({current_price:,}), 시가({open_price:,})"
         )
-        return TradingSignal.hold(
-            stock_code, f"진입 조건 미충족 (하락률: {dip_rate*100:.2f}%)"
+
+        return TradingSignal.buy(
+            stock_code=stock_code,
+            quantity=self._position_size,
+            reason=f"스캘핑 시그널: 현재가({current_price:,})",
+            confidence=0.9,
         )

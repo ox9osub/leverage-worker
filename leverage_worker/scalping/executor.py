@@ -641,17 +641,19 @@ class ScalpingExecutor:
         # 4. 호가 단위 맞춤
         buy_price = round_to_tick_size(buy_price, direction="down")
 
-        # 5. P20 시그널가 하락률 체크
+        # 5. 시그널가 대비 하락률 체크
         signal_price = self._signal_ctx.signal_price
-        p20_price = self._boundary_tracker.get_percentile_price(20.0)
-        if p20_price is None:
+        p_price = self._boundary_tracker.get_percentile_price(
+            self._config.percentile_threshold
+        )
+        if p_price is None:
             return
 
-        dip_rate = (signal_price - p20_price) / signal_price
+        dip_rate = (signal_price - p_price) / signal_price
         min_dip = self._config.dip_from_signal_pct
         if dip_rate < min_dip:
             logger.debug(
-                f"[scalping][{self._stock_name}] P20({p20_price:,}) "
+                f"[scalping][{self._stock_name}] P{self._config.percentile_threshold:.0f}({p_price:,}) "
                 f"하락률 {dip_rate*100:.3f}% < {min_dip*100:.2f}% → 매수 대기"
             )
             return
