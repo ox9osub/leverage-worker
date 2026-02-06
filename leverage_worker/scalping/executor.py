@@ -441,6 +441,8 @@ class ScalpingExecutor:
                         quantity=actual_fill,
                         price=filled_price,
                         strategy_name=self._strategy_name,
+                        total_filled=self._held_qty,
+                        order_quantity=self._buy_order_qty,
                     )
                 except Exception as e:
                     logger.warning(f"[scalping] Slack 알림 실패: {e}")
@@ -461,6 +463,8 @@ class ScalpingExecutor:
                         quantity=actual_fill,
                         price=filled_price,
                         strategy_name=self._strategy_name,
+                        total_filled=self._held_qty,
+                        order_quantity=self._buy_order_qty,
                     )
                 except Exception as e:
                     logger.warning(f"[scalping] Slack 알림 실패: {e}")
@@ -555,6 +559,7 @@ class ScalpingExecutor:
         # Slack 알림 - 부분 매도
         if self._slack:
             try:
+                fill_profit_rate = ((filled_price / self._held_avg_price) - 1) * 100 if self._held_avg_price > 0 else 0.0
                 self._slack.notify_fill(
                     fill_type="SELL",
                     stock_code=self._stock_code,
@@ -562,6 +567,8 @@ class ScalpingExecutor:
                     quantity=actual_fill,
                     price=filled_price,
                     strategy_name=self._strategy_name,
+                    profit_loss=fill_pnl,
+                    profit_rate=fill_profit_rate,
                     total_filled=self._sold_qty,
                     order_quantity=self._sell_order_qty,
                 )
@@ -1091,6 +1098,7 @@ class ScalpingExecutor:
             # Slack 알림 - 부분 매도
             if self._slack:
                 try:
+                    fill_profit_rate = ((sell_price / self._held_avg_price) - 1) * 100 if self._held_avg_price > 0 else 0.0
                     self._slack.notify_fill(
                         fill_type="SELL",
                         stock_code=self._stock_code,
@@ -1098,6 +1106,8 @@ class ScalpingExecutor:
                         quantity=new_fills,
                         price=sell_price,
                         strategy_name=self._strategy_name,
+                        profit_loss=fill_pnl,
+                        profit_rate=fill_profit_rate,
                         total_filled=self._sold_qty,
                         order_quantity=self._sell_order_qty,
                     )

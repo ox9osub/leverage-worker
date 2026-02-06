@@ -278,12 +278,12 @@ class SlackNotifier:
             total_amount = quantity * price
             header = (
                 f"{self._get_mode_prefix()}[{signal_text}] "
-                f"{stock_name}({stock_code}) / {quantity}주 / {price:,}원 / {total_amount:,}원"
+                f"{stock_name}({stock_code}) / {quantity}주 / *{price:,}원* / {total_amount:,}원"
             )
         else:
             header = (
                 f"{self._get_mode_prefix()}[{signal_text}] "
-                f"{stock_name}({stock_code}) / {price:,}원"
+                f"{stock_name}({stock_code}) / *{price:,}원*"
             )
 
         lines = [
