@@ -1320,13 +1320,25 @@ class TradingEngine:
 
                                 # LONG 시그널: 기존 로직
                                 if signal.is_buy and not executor.is_active:
-                                    executor.activate_signal(
-                                        signal_price=current_price,
-                                        tp_pct=executor._config.take_profit_pct,
-                                        sl_pct=executor._config.stop_loss_pct,
-                                        timeout_minutes=executor._config.max_signal_minutes,
-                                    )
-                                    # Slack notification now handled in executor.activate_signal()
+                                    # main_beam_1 등 limit_order 전략: 즉시 지정가 매수
+                                    if signal.metadata.get("limit_price"):
+                                        executor.activate_limit_order(
+                                            buy_price=signal.metadata["limit_price"],
+                                            sell_price=signal.metadata["sell_price"],
+                                            timeout_seconds=signal.metadata.get(
+                                                "timeout_seconds", 60
+                                            ),
+                                            quantity=signal.quantity,
+                                        )
+                                    else:
+                                        # 기존 boundary_tracker 기반 스캘핑
+                                        executor.activate_signal(
+                                            signal_price=current_price,
+                                            tp_pct=executor._config.take_profit_pct,
+                                            sl_pct=executor._config.stop_loss_pct,
+                                            timeout_minutes=executor._config.max_signal_minutes,
+                                        )
+                                    # Slack notification now handled in executor methods
 
                                 # NEW: SHORT 시그널 → 활성화 중일 때만 처리
                                 elif signal.is_sell and executor.is_active:

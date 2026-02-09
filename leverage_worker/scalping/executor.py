@@ -212,6 +212,110 @@ class ScalpingExecutor:
                 except Exception as e:
                     logger.warning(f"[scalping] Slack 알림 실패: {e}")
 
+    def activate_limit_order(
+        self,
+        buy_price: int,
+        sell_price: int,
+        timeout_seconds: int,
+        quantity: int,
+    ) -> bool:
+        """
+        지정가 매수 즉시 실행 (boundary_tracker 미사용)
+
+        main_beam_1 전략용: 신호 발생 즉시 지정가 매수 주문
+
+        Args:
+            buy_price: 지정가 매수 가격 (prev_close * 0.999)
+            sell_price: 지정가 매도 가격 (buy_price * 1.001)
+            timeout_seconds: 타임아웃 (초) - 매수 후 시간 기반 손절
+            quantity: 매수 수량
+
+        Returns:
+            주문 성공 여부
+        """
+        with self._lock:
+            if self._state != ScalpingState.IDLE:
+                logger.warning(
+                    f"[scalping][{self._stock_code}] "
+                    f"limit_order 무시: 이미 활성 상태 ({self._state.value})"
+                )
+                return False
+
+            # 컨텍스트 설정
+            timeout_minutes = max(1, timeout_seconds // 60)
+            self._signal_ctx = ScalpingSignalContext(
+                signal_price=buy_price,
+                signal_time=datetime.now(),
+                tp_pct=0.001,  # 참고용 (실제로는 sell_price 사용)
+                sl_pct=0.001,  # 참고용
+                timeout_minutes=timeout_minutes,
+            )
+            # 메타데이터에 매도가/타임아웃 저장
+            self._signal_ctx.metadata["sell_price"] = sell_price
+            self._signal_ctx.metadata["timeout_seconds"] = timeout_seconds
+            self._signal_ctx.metadata["is_limit_order"] = True
+
+            # 즉시 지정가 매수 주문 (MONITORING 건너뜀)
+            logger.info(
+                f"[scalping][{self._stock_name}] limit_order 매수 주문: "
+                f"buy_price={buy_price:,}, sell_price={sell_price:,}, "
+                f"qty={quantity}, timeout={timeout_seconds}초"
+            )
+
+            try:
+                result = self._broker.place_buy_order(
+                    stock_code=self._stock_code,
+                    price=buy_price,
+                    quantity=quantity,
+                    order_type="LIMIT",
+                )
+            except Exception as e:
+                logger.error(f"[scalping][{self._stock_code}] 매수 주문 실패: {e}")
+                return False
+
+            if result and result.success:
+                self._buy_order_id = result.order_id
+                self._buy_order_branch = getattr(result, "branch_no", "01")
+                self._buy_order_price = buy_price
+                self._buy_order_qty = quantity
+                self._buy_order_time = datetime.now()
+                self._transition(ScalpingState.BUY_PENDING)
+
+                # DB 저장
+                self._save_order_to_db(result.order_id, "BUY", quantity, buy_price)
+
+                logger.info(
+                    f"[scalping][{self._stock_name}] limit_order 매수 주문 완료: "
+                    f"order_id={result.order_id}, "
+                    f"{buy_price:,}원 x {quantity}주"
+                )
+
+                # Slack 알림
+                if self._slack:
+                    try:
+                        self._slack.notify_signal(
+                            stock_code=self._stock_code,
+                            stock_name=self._stock_name,
+                            signal_type="BUY",
+                            price=buy_price,
+                            strategy_name=self._strategy_name,
+                            reason=(
+                                f"지정가 매수 (목표 매도={sell_price:,}원, "
+                                f"타임아웃={timeout_seconds}초)"
+                            ),
+                            strategy_win_rate=None,
+                        )
+                    except Exception as e:
+                        logger.warning(f"[scalping] Slack 알림 실패: {e}")
+
+                return True
+            else:
+                logger.error(
+                    f"[scalping][{self._stock_code}] limit_order 매수 주문 실패: "
+                    f"result={result}"
+                )
+                return False
+
     def handle_short_signal(self, short_price: int, reason: str) -> None:
         """
         SHORT 시그널 감지 시 즉시 청산
@@ -1218,7 +1322,15 @@ class ScalpingExecutor:
             self._cooldown_start = datetime.now()
             return
 
-        sell_price = self._calculate_sell_price(self._held_avg_price)
+        # main_beam_1 등 limit_order 전략: metadata에서 매도가 사용
+        if (
+            self._signal_ctx
+            and self._signal_ctx.metadata.get("is_limit_order")
+            and self._signal_ctx.metadata.get("sell_price")
+        ):
+            sell_price = self._signal_ctx.metadata["sell_price"]
+        else:
+            sell_price = self._calculate_sell_price(self._held_avg_price)
 
         result = self._broker.place_limit_order(
             stock_code=self._stock_code,

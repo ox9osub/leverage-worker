@@ -2,7 +2,7 @@
 스캘핑 전략 데이터 모델
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Any, Dict
@@ -116,6 +116,9 @@ class ScalpingSignalContext:
     cycle_count: int = 0  # 완료된 매매 사이클 수
     total_pnl: int = 0  # 누적 손익 (원)
     total_trades: int = 0  # 총 매매 횟수
+
+    # 추가 메타데이터 (main_beam_1 등 지정가 전략용)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def tp_price(self) -> int:
