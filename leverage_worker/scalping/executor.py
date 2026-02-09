@@ -834,7 +834,11 @@ class ScalpingExecutor:
     def _handle_buy_pending(self, price: int, timestamp: datetime) -> None:
         """BUY_PENDING: REST 폴백 + 타임아웃 처리 (WS가 우선)"""
         if not self._buy_order_id:
-            self._transition(ScalpingState.MONITORING)
+            # limit_order 모드: IDLE로 복귀
+            if self._signal_ctx and self._signal_ctx.metadata.get("is_limit_order"):
+                self._reset_to_idle()
+            else:
+                self._transition(ScalpingState.MONITORING)
             return
 
         # 타임아웃 확인 (매 틱)
@@ -977,7 +981,11 @@ class ScalpingExecutor:
                     self._last_order_check_time = timestamp
 
         if self._held_qty <= 0:
-            self._transition(ScalpingState.MONITORING)
+            # limit_order 모드: IDLE로 복귀
+            if self._signal_ctx and self._signal_ctx.metadata.get("is_limit_order"):
+                self._reset_to_idle()
+            else:
+                self._transition(ScalpingState.MONITORING)
             return
 
         # +0.1% 매도 조건 확인
@@ -1222,14 +1230,25 @@ class ScalpingExecutor:
 
     def _handle_cooldown(self, price: int, timestamp: datetime) -> None:
         """
-        COOLDOWN: 즉시 MONITORING 복귀 (NEW)
+        COOLDOWN: limit_order는 IDLE, 일반은 MONITORING 복귀
 
-        바운더리가 새로 구성될 때까지 자동 대기하므로 시간 기반 cooldown 불필요
+        - limit_order: one-shot 전략, 다음 신호 대기를 위해 IDLE로 복귀
+        - 일반 scalping: 바운더리가 새로 구성될 때까지 MONITORING에서 대기
         """
         # Slack dedup 초기화: 다음 사이클 알림 허용
         if self._slack:
             self._slack.reset_signal_for_key(self._stock_code, self._strategy_name)
 
+        # limit_order 모드: IDLE로 복귀 (boundary_tracker 미사용, 다음 신호 대기)
+        if self._signal_ctx and self._signal_ctx.metadata.get("is_limit_order"):
+            logger.info(
+                f"[scalping][{self._stock_name}] limit_order 완료 → IDLE (다음 신호 대기)"
+            )
+            self._log_signal_summary()
+            self._reset_to_idle()
+            return
+
+        # === 기존 scalping 로직 ===
         # 최대 사이클 수 확인
         if self._signal_ctx and self._signal_ctx.cycle_count >= self._config.max_cycles:
             logger.info(
@@ -1506,7 +1525,7 @@ class ScalpingExecutor:
         return success
 
     def _cancel_buy_and_return_to_monitoring(self) -> None:
-        """매수 취소 후 MONITORING 복귀 (취소 중 체결 처리 포함)"""
+        """매수 취소 후 복귀 (limit_order는 IDLE, 일반은 MONITORING)"""
         cancel_qty = self._buy_order_qty
         cancel_price = self._buy_order_price
         self._cancel_buy_order()
@@ -1527,6 +1546,26 @@ class ScalpingExecutor:
                 return
 
         self._clear_buy_order()
+
+        # limit_order 모드: IDLE로 복귀 (boundary_tracker 미사용, 다음 신호 대기)
+        if self._signal_ctx and self._signal_ctx.metadata.get("is_limit_order"):
+            logger.info(
+                f"[scalping][{self._stock_name}] limit_order 매수 미체결 → IDLE"
+            )
+            if self._slack:
+                try:
+                    self._slack.send_message(
+                        f"⏱️ [{self._stock_name}] 매수 미체결 취소\n"
+                        f"• {cancel_price:,}원 x {cancel_qty}주\n"
+                        f"• 다음 신호 대기 중"
+                    )
+                except Exception:
+                    pass
+            self._log_signal_summary()
+            self._reset_to_idle()
+            return
+
+        # 기존 scalping: MONITORING으로 복귀 (바운더리 재탐색)
         self._transition(ScalpingState.MONITORING)
 
         # Slack 알림 - 매수 타임아웃 취소
