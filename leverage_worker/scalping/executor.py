@@ -217,7 +217,7 @@ class ScalpingExecutor:
         buy_price: int,
         sell_price: int,
         timeout_seconds: int,
-        quantity: int,
+        quantity: int = 0,
     ) -> bool:
         """
         지정가 매수 즉시 실행 (boundary_tracker 미사용)
@@ -228,7 +228,7 @@ class ScalpingExecutor:
             buy_price: 지정가 매수 가격 (prev_close * 0.999)
             sell_price: 지정가 매도 가격 (buy_price * 1.001)
             timeout_seconds: 타임아웃 (초) - 매수 후 시간 기반 손절
-            quantity: 매수 수량
+            quantity: 매수 수량 (0이면 allocation 기반 자동 계산)
 
         Returns:
             주문 성공 여부
@@ -241,13 +241,32 @@ class ScalpingExecutor:
                 )
                 return False
 
+            # allocation 기반 수량 계산
+            if quantity <= 0:
+                buyable_qty, _ = self._broker.get_buyable_quantity(
+                    self._stock_code, buy_price
+                )
+                if buyable_qty > 0:
+                    quantity = int(buyable_qty * (self._allocation / 100))
+                    if quantity < 1:
+                        quantity = 1
+                    logger.info(
+                        f"[scalping][{self._stock_code}] 수량 계산: "
+                        f"{buyable_qty}주 x {self._allocation}% = {quantity}주"
+                    )
+                else:
+                    logger.error(
+                        f"[scalping][{self._stock_code}] 매수가능수량 조회 실패"
+                    )
+                    return False
+
             # 컨텍스트 설정
             timeout_minutes = max(1, timeout_seconds // 60)
             self._signal_ctx = ScalpingSignalContext(
                 signal_price=buy_price,
                 signal_time=datetime.now(),
                 tp_pct=0.001,  # 참고용 (실제로는 sell_price 사용)
-                sl_pct=0.001,  # 참고용
+                sl_pct=0.01,  # 1% 손절
                 timeout_minutes=timeout_minutes,
             )
             # 메타데이터에 매도가/타임아웃 저장
@@ -421,10 +440,12 @@ class ScalpingExecutor:
             if self._state == ScalpingState.IDLE:
                 return
 
-            # boundary tracker: MONITORING/BUY_PENDING에서만 동작
+            # boundary tracker: MONITORING/BUY_PENDING에서만 동작 (limit_order 제외)
             event = None
             if self._state in (ScalpingState.MONITORING, ScalpingState.BUY_PENDING):
-                event = self._boundary_tracker.add_tick(price)
+                # limit_order는 boundary tracking 스킵
+                if not (self._signal_ctx and self._signal_ctx.metadata.get("is_limit_order")):
+                    event = self._boundary_tracker.add_tick(price)
                 if event == "BREACH":
                     logger.info(
                         f"[scalping][{self._stock_name}] 바운더리 이탈 "
@@ -1057,8 +1078,8 @@ class ScalpingExecutor:
                 self._cooldown_start = timestamp
             return
 
-        # 매도 타임아웃 체크 (체결 없으면 시장가 전환)
-        if self._sell_order_time:
+        # 매도 타임아웃 체크 (지정가 주문만, 시장가는 스킵)
+        if self._sell_order_time and self._sell_order_price > 0:
             timeout_sec = self._config.sell_timeout_seconds
             # 기준 시간: 마지막 체결 시간 또는 주문 시간
             reference_time = self._last_sell_fill_time or self._sell_order_time
@@ -1083,8 +1104,8 @@ class ScalpingExecutor:
                 self._market_sell_all(reason)
                 return
 
-        # SL 체크 (매 틱, API 호출 없음)
-        if self._signal_ctx and price <= self._signal_ctx.sl_price:
+        # SL 체크 (지정가 주문만, 시장가는 스킵)
+        if self._sell_order_price > 0 and self._signal_ctx and price <= self._signal_ctx.sl_price:
             logger.warning(f"[scalping] 매도 대기 중 SL 도달 → 시장가 전환")
 
             # 부분 매도 PnL 보존 후 주문 정리
@@ -1303,12 +1324,14 @@ class ScalpingExecutor:
                 total_cycles = self._signal_ctx.cycle_count
                 total_pnl = self._signal_ctx.total_pnl
 
+                now = datetime.now()
                 self._slack.send_message(
                     f"[{self._stock_name}] 스캘핑 시그널 종료\n"
                     f"• 사유: {reason}\n"
                     f"• 완료 사이클: {total_cycles}회\n"
                     f"• 누적 손익: {total_pnl:,}원\n"
-                    f"• 평균 손익: {total_pnl//total_cycles if total_cycles > 0 else 0:,}원/사이클"
+                    f"• 평균 손익: {total_pnl//total_cycles if total_cycles > 0 else 0:,}원/사이클\n"
+                    f"{now.strftime('%Y-%m-%d %H:%M:%S')}"
                 )
             except Exception as e:
                 logger.warning(f"[scalping] Slack 알림 실패: {e}")
@@ -1757,6 +1780,7 @@ class ScalpingExecutor:
         self._clear_position()
         self._cooldown_start = None
         self._price_tracker.reset()
+        self._boundary_tracker.reset()
         self._transition(ScalpingState.IDLE)
 
     # ── DB 저장 헬퍼 ──────────────────────────────────────────
