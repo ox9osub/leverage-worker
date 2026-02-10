@@ -23,7 +23,7 @@ ML 기반 1분 지정가 스캘핑 전략
     buy_discount_pct: 매수 할인율 (기본 0.001 = -0.1%)
     sell_profit_pct: 매도 수익율 (기본 0.001 = +0.1%)
     timeout_seconds: 타임아웃 (기본 60초)
-    position_size: 매수 수량 (기본 1)
+    * 수량은 config의 allocation 비율로 자동 계산
 
 백테스트 결과:
     - 보유시간: 1분
@@ -32,6 +32,7 @@ ML 기반 1분 지정가 스캘핑 전략
     - 거래수: 2,062회
 """
 
+import csv
 import logging
 from datetime import datetime, time
 from pathlib import Path
@@ -74,7 +75,6 @@ class MainBeam1Strategy(BaseStrategy):
         self._buy_discount_pct = self.get_param("buy_discount_pct", 0.001)  # -0.1%
         self._sell_profit_pct = self.get_param("sell_profit_pct", 0.001)    # +0.1%
         self._timeout_seconds = self.get_param("timeout_seconds", 60)       # 1분
-        self._position_size = self.get_param("position_size", 1)
 
         # 거래 시간 설정
         self._trading_start = self.get_param("trading_start", "09:00")
@@ -216,6 +216,9 @@ class MainBeam1Strategy(BaseStrategy):
             logger.warning(f"[{stock_code}] 모델 예측 실패: {e}")
             return TradingSignal.hold(stock_code, f"예측 실패: {e}")
 
+        # CSV 시그널 기록 (분석/백테스트용)
+        self._record_signal_to_csv(context, df, proba)
+
         # 임계값 확인
         if proba < self._threshold:
             logger.debug(
@@ -244,10 +247,10 @@ class MainBeam1Strategy(BaseStrategy):
             f"sell={sell_price:,} (+{self._sell_profit_pct*100:.1f}%)"
         )
 
-        # 메타데이터에 지정가 정보 포함
+        # 메타데이터에 지정가 정보 포함 (quantity=0: executor에서 allocation 기반 계산)
         signal = TradingSignal.buy(
             stock_code=stock_code,
-            quantity=self._position_size,
+            quantity=0,
             reason=f"ML 확률 {proba:.1%} >= {self._threshold:.0%}",
             confidence=proba,
         )
@@ -286,3 +289,113 @@ class MainBeam1Strategy(BaseStrategy):
 
         self._entry_time = None
         self._entry_price = None
+
+    def _record_signal_to_csv(
+        self,
+        context: StrategyContext,
+        df,
+        proba: float
+    ) -> None:
+        """시그널 정보를 CSV에 기록 (분석/백테스트용)"""
+        try:
+            last_row = df.iloc[-1]
+
+            # 기본 정보 계산
+            prev_close = int(df["close"].iloc[-1])
+            change_rate = (context.current_price - prev_close) / prev_close * 100 if prev_close > 0 else 0
+            pos_str = "보유" if context.has_position else ""
+            signal_label = "BUY" if proba >= self._threshold else "HOLD"
+
+            # 지정가 정보 (BUY 시그널인 경우에만 의미있음)
+            if proba >= self._threshold:
+                buy_price = round_to_tick_size(
+                    int(prev_close * (1 - self._buy_discount_pct)), direction="down"
+                )
+                sell_price = round_to_tick_size(
+                    int(buy_price * (1 + self._sell_profit_pct)), direction="up"
+                )
+            else:
+                buy_price = 0
+                sell_price = 0
+
+            # CSV 경로
+            csv_dir = Path(__file__).resolve().parent.parent.parent / "data" / "signals"
+            csv_dir.mkdir(parents=True, exist_ok=True)
+            csv_path = csv_dir / f"{context.current_time.strftime('%Y%m%d')}-{self.name}.csv"
+
+            # 헤더 정의 (33개 필드)
+            headers = [
+                # Tier 1: 기본 정보
+                "시간", "현재가", "등락률", "포지션", "시그널", "proba", "threshold",
+                # Tier 2: 주문 정보
+                "limit_price", "sell_price", "prev_close",
+                # Tier 3: 기술지표
+                "rsi_7", "rsi_14", "macd", "macd_signal", "macd_hist",
+                "bb_position_20", "bb_width_20", "stoch_k_7", "stoch_d_7",
+                # Tier 4: 거래량/모멘텀/변동성
+                "volume_ratio_20", "volume_surge", "momentum_5", "momentum_10", "momentum_20",
+                "volatility_20", "atr_pct",
+                # Tier 5: 캔들 패턴
+                "is_bullish", "is_bearish", "consecutive_up", "consecutive_down",
+                # Tier 6: 시장 상태/시간
+                "daily_position", "price_vs_day_open",
+                "minutes_since_open", "is_opening_30min", "is_closing_30min", "session_progress"
+            ]
+
+            # 데이터 행
+            row = [
+                # Tier 1: 기본 정보
+                context.current_time.strftime("%H:%M:%S"),
+                context.current_price,
+                f"{change_rate:+.2f}",
+                pos_str,
+                signal_label,
+                f"{proba:.4f}",
+                f"{self._threshold:.2f}",
+                # Tier 2: 주문 정보
+                buy_price,
+                sell_price,
+                prev_close,
+                # Tier 3: 기술지표
+                f"{last_row.get('rsi_7', 0):.2f}",
+                f"{last_row.get('rsi_14', 0):.2f}",
+                f"{last_row.get('macd', 0):.4f}",
+                f"{last_row.get('macd_signal', 0):.4f}",
+                f"{last_row.get('macd_hist', 0):.4f}",
+                f"{last_row.get('bb_position_20', 0):.4f}",
+                f"{last_row.get('bb_width_20', 0):.4f}",
+                f"{last_row.get('stoch_k_7', 0):.2f}",
+                f"{last_row.get('stoch_d_7', 0):.2f}",
+                # Tier 4: 거래량/모멘텀/변동성
+                f"{last_row.get('volume_ratio_20', 0):.4f}",
+                int(last_row.get('volume_surge', 0)),
+                f"{last_row.get('momentum_5', 0):+.0f}",
+                f"{last_row.get('momentum_10', 0):+.0f}",
+                f"{last_row.get('momentum_20', 0):+.0f}",
+                f"{last_row.get('volatility_20', 0):.6f}",
+                f"{last_row.get('atr_pct', 0):.6f}",
+                # Tier 5: 캔들 패턴
+                int(last_row.get('is_bullish', 0)),
+                int(last_row.get('is_bearish', 0)),
+                int(last_row.get('consecutive_up', 0)),
+                int(last_row.get('consecutive_down', 0)),
+                # Tier 6: 시장 상태/시간
+                f"{last_row.get('daily_position', 0):.4f}",
+                f"{last_row.get('price_vs_day_open', 0):.4f}",
+                int(last_row.get('minutes_since_open', 0)),
+                int(last_row.get('is_opening_30min', 0)),
+                int(last_row.get('is_closing_30min', 0)),
+                f"{last_row.get('session_progress', 0):.4f}"
+            ]
+
+            # CSV 기록
+            write_header = not csv_path.exists()
+            with open(csv_path, "a", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                if write_header:
+                    writer.writerow(headers)
+                writer.writerow(row)
+
+        except Exception as e:
+            # CSV 기록 실패는 전략 실행에 영향 주지 않음
+            logger.debug(f"[{context.stock_code}] CSV 기록 실패: {e}")
