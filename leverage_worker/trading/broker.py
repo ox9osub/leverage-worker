@@ -272,7 +272,7 @@ class KISBroker:
             "ACNT_PRDT_CD": self._account_prod,
             "AFHR_FLPR_YN": "N",
             "OFL_YN": "",
-            "INQR_DVSN": "02",  # 종목별
+            "INQR_DVSN": "01",  # 대출일별 (모의투자 호환)
             "UNPR_DVSN": "01",
             "FUND_STTL_ICLD_YN": "N",
             "FNCG_AMT_AUTO_RDPT_YN": "N",
