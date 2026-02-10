@@ -263,11 +263,11 @@ class ScalpingExecutor:
             )
 
             try:
-                result = self._broker.place_buy_order(
+                result = self._broker.place_limit_order(
                     stock_code=self._stock_code,
-                    price=buy_price,
+                    side=OrderSide.BUY,
                     quantity=quantity,
-                    order_type="LIMIT",
+                    price=buy_price,
                 )
             except Exception as e:
                 logger.error(f"[scalping][{self._stock_code}] 매수 주문 실패: {e}")

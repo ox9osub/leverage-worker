@@ -5,10 +5,14 @@ main_beam_1 전략 (90_1 백테스트) 전용
 ML_LIMIT_ORDER_STRATEGY_RESULTS.md의 calculate_features() 함수 구현
 """
 import logging
+import warnings
 from typing import List, Optional
 
 import numpy as np
 import pandas as pd
+
+# DataFrame fragmentation 경고 억제 (성능상 문제 없음, 메모리 최적화는 마지막에 수행)
+warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 
 logger = logging.getLogger(__name__)
 
@@ -243,7 +247,8 @@ def calculate_features(bars: pd.DataFrame) -> pd.DataFrame:
     df = df.fillna(0)
     df = df.replace([np.inf, -np.inf], 0)
 
-    return df
+    # 메모리 최적화 (fragmentation 해소)
+    return df.copy()
 
 
 def _count_consecutive(series: np.ndarray) -> List[int]:

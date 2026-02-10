@@ -40,6 +40,7 @@ from typing import Any, Dict, Optional
 from leverage_worker.ml.data_utils import candles_to_dataframe
 from leverage_worker.ml.ensemble_classifier import EnsembleClassifier
 from leverage_worker.ml.features_limit_order import calculate_features
+from leverage_worker.scalping.executor import round_to_tick_size
 from leverage_worker.strategy.base import BaseStrategy, StrategyContext, TradingSignal
 from leverage_worker.strategy.registry import register_strategy
 
@@ -228,8 +229,12 @@ class MainBeam1Strategy(BaseStrategy):
 
         # 지정가 매수 가격 계산: 이전 봉 종가 * (1 - discount)
         prev_close = int(df["close"].iloc[-1])
-        buy_price = int(prev_close * (1 - self._buy_discount_pct))
-        sell_price = int(buy_price * (1 + self._sell_profit_pct))
+        buy_price = round_to_tick_size(
+            int(prev_close * (1 - self._buy_discount_pct)), direction="down"
+        )
+        sell_price = round_to_tick_size(
+            int(buy_price * (1 + self._sell_profit_pct)), direction="up"
+        )
 
         logger.info(
             f"[{stock_code}] BUY 시그널 발생 | "

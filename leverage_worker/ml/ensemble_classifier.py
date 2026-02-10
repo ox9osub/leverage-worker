@@ -5,11 +5,15 @@ LightGBM, XGBoost, CatBoost, RandomForest 모델의 predict_proba 평균 계산
 main_beam_1 전략 (90_1 지정가 매수)에서 사용
 """
 import logging
+import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
 import joblib
 import numpy as np
+
+# sklearn feature names 경고 억제 (numpy array로 예측해도 결과 동일)
+warnings.filterwarnings("ignore", message="X does not have valid feature names")
 
 logger = logging.getLogger(__name__)
 
