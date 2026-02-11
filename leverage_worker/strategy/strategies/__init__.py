@@ -13,7 +13,8 @@ KODEX 레버리지 (122630) 전략:
 ML 기반 전략 (122630):
     - ml_price_position: ML 가격 위치 전략 (변동성 예측 + 가격 위치)
     - ml_momentum: ML 모멘텀 전략 (변동성 예측 + 모멘텀)
-    - main_beam_1: ML 지정가 매수 전략 (90_1, 앙상블 모델)
+    - main_beam_1: ML 지정가 매수 전략 (90_1, 앙상블 모델, 1분 보유)
+    - main_beam_2: ML 지정가 매수 전략 (90_2, 앙상블 모델, 2분 보유)
 
 KODEX 코스닥150레버리지 (233740) 전략:
     - kosdaq_bb_conservative: 볼린저 밴드 보수적 전략 (BB_Conservative)
@@ -42,6 +43,7 @@ from leverage_worker.strategy.strategies.fee_optimized import FeeOptimizedStrate
 from leverage_worker.strategy.strategies.ml_price_position import MLPricePositionStrategy
 from leverage_worker.strategy.strategies.ml_momentum import MLMomentumStrategy
 from leverage_worker.strategy.strategies.main_beam_1 import MainBeam1Strategy
+from leverage_worker.strategy.strategies.main_beam_2 import MainBeam2Strategy
 
 # KODEX 코스닥150레버리지 (233740) 전략
 from leverage_worker.strategy.strategies.kosdaq_bb_conservative import (
@@ -71,6 +73,7 @@ __all__ = [
     "MLPricePositionStrategy",
     "MLMomentumStrategy",
     "MainBeam1Strategy",
+    "MainBeam2Strategy",
     # KODEX 코스닥150레버리지 (233740) 전략
     "KosdaqBBConservativeStrategy",
     "KosdaqDonchianStrategy",

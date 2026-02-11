@@ -459,8 +459,18 @@ class ScalpingExecutor:
             if self._signal_ctx and self._state != ScalpingState.SELL_PENDING:
                 expired, reason = self._signal_ctx.is_expired(timestamp, price)
                 if expired:
-                    self._handle_signal_expired(reason, price)
-                    return
+                    # [limit_order] buy_timeout 중에는 시그널 TP 무시
+                    is_limit_order = self._signal_ctx.metadata.get("is_limit_order")
+                    if is_limit_order and self._buy_order_time and "TP" in reason:
+                        elapsed = (timestamp - self._buy_order_time).total_seconds()
+                        if elapsed < self._config.buy_timeout_seconds:
+                            pass  # 시그널 TP 스킵, SL/타임아웃은 처리
+                        else:
+                            self._handle_signal_expired(reason, price)
+                            return
+                    else:
+                        self._handle_signal_expired(reason, price)
+                        return
 
             # 상태별 핸들러 디스패치
             # MONITORING handler에 event 전달 (DIP 감지용)
@@ -1009,44 +1019,66 @@ class ScalpingExecutor:
                 self._transition(ScalpingState.MONITORING)
             return
 
+        # limit_order 전략 여부 확인
+        is_limit_order = self._signal_ctx and self._signal_ctx.metadata.get(
+            "is_limit_order"
+        )
+
+        # [limit_order] buy_timeout 경과 시 미체결 즉시 취소 (POSITION_HELD 유지)
+        if is_limit_order and self._buy_order_id and self._buy_order_time:
+            elapsed = (timestamp - self._buy_order_time).total_seconds()
+            if elapsed >= self._config.buy_timeout_seconds:
+                cancel_qty = self._buy_order_qty - self._held_qty
+                logger.info(
+                    f"[scalping][{self._stock_name}] buy_timeout 경과 "
+                    f"({elapsed:.0f}초) → 미체결 {cancel_qty}주 취소"
+                )
+                self._cancel_buy_order()
+                self._clear_buy_order()
+                # return 없음 - 아래 TP/SL 체크 계속
+
         # +0.1% 매도 조건 확인
         sell_target = self._calculate_sell_price(self._held_avg_price)
         if price >= sell_target:
-            logger.info(
-                f"[scalping][{self._stock_name}] TP 도달: "
-                f"현재가 {price:,} >= 목표가 {sell_target:,}"
-            )
-            # 매수 주문 남아있으면 먼저 취소
-            if self._buy_order_id:
-                cancel_qty = self._buy_order_qty - self._held_qty
-                self._cancel_buy_order()
-
-                # 취소 후 최종 체결량 재확인 (취소 중 체결 가능)
-                final_filled, _ = self._broker.get_order_status(
-                    self._buy_order_id,
-                    stock_code=self._stock_code,
-                    order_qty=self._buy_order_qty,
-                    side=OrderSide.BUY,
+            # [limit_order] 미체결 있으면 TP 무시 (buy_timeout 중)
+            if is_limit_order and self._buy_order_id:
+                pass  # TP 스킵, SL 체크로 넘어감
+            else:
+                logger.info(
+                    f"[scalping][{self._stock_name}] TP 도달: "
+                    f"현재가 {price:,} >= 목표가 {sell_target:,}"
                 )
-                if final_filled > self._held_qty:
-                    self._update_position(final_filled, self._buy_order_price)
-                    logger.info(f"[취소 중 체결] +{final_filled - self._held_qty}주")
+                # 매수 주문 남아있으면 먼저 취소 (일반 전략용)
+                if self._buy_order_id:
+                    cancel_qty = self._buy_order_qty - self._held_qty
+                    self._cancel_buy_order()
 
-                # Slack 알림 - TP 매수 취소
-                if self._slack:
-                    try:
-                        self._slack.send_message(
-                            f"📊 [{self._stock_name}] TP 도달 → 미체결 매수 취소\n"
-                            f"• 취소: {cancel_qty}주 / 체결: {self._held_qty}주\n"
-                            f"• 시장가 매도 진행"
-                        )
-                    except Exception:
-                        pass
-                self._clear_buy_order()
+                    # 취소 후 최종 체결량 재확인 (취소 중 체결 가능)
+                    final_filled, _ = self._broker.get_order_status(
+                        self._buy_order_id,
+                        stock_code=self._stock_code,
+                        order_qty=self._buy_order_qty,
+                        side=OrderSide.BUY,
+                    )
+                    if final_filled > self._held_qty:
+                        self._update_position(final_filled, self._buy_order_price)
+                        logger.info(f"[취소 중 체결] +{final_filled - self._held_qty}주")
 
-            # 부분체결 상황 → 시장가 매도
-            self._market_sell_all("부분체결 TP 도달")
-            return  # SELL_PENDING 전환 후 즉시 반환 (SL 중복 실행 방지)
+                    # Slack 알림 - TP 매수 취소
+                    if self._slack:
+                        try:
+                            self._slack.send_message(
+                                f"📊 [{self._stock_name}] TP 도달 → 미체결 매수 취소\n"
+                                f"• 취소: {cancel_qty}주 / 체결: {self._held_qty}주\n"
+                                f"• 시장가 매도 진행"
+                            )
+                        except Exception:
+                            pass
+                    self._clear_buy_order()
+
+                # 부분체결 상황 → 시장가 매도
+                self._market_sell_all("부분체결 TP 도달")
+                return  # SELL_PENDING 전환 후 즉시 반환 (SL 중복 실행 방지)
 
         # SL 체크 (매 틱)
         if self._signal_ctx and price <= self._signal_ctx.sl_price:
