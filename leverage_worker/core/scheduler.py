@@ -47,10 +47,14 @@ class TradingScheduler:
 
         # 콜백
         self._on_stock_tick: Optional[Callable[[str, datetime], None]] = None
+        self._on_prefetch_tick: Optional[Callable[[str, datetime], None]] = None
         self._on_check_fills: Optional[Callable[[], None]] = None
         self._on_market_open: Optional[Callable[[], None]] = None
         self._on_market_close: Optional[Callable[[], None]] = None
         self._on_idle: Optional[Callable[[], None]] = None
+
+        # Prefetch 설정
+        self._prefetch_second: int = 55  # 매분 n초에 예수금 사전 조회
 
         # 특정 시간 콜백 (예: "15:19" -> callback)
         self._specific_time_callbacks: Dict[str, Callable[[], None]] = {}
@@ -91,6 +95,20 @@ class TradingScheduler:
     def set_on_idle(self, callback: Callable[[], None]) -> None:
         """대기 상태 콜백 설정 (장외 1분마다)"""
         self._on_idle = callback
+
+    def set_on_prefetch_tick(
+        self, callback: Callable[[str, datetime], None], prefetch_second: int = 55
+    ) -> None:
+        """
+        예수금 사전 조회 콜백 설정
+
+        Args:
+            callback: (stock_code, current_time) -> None
+            prefetch_second: 매분 n초에 실행 (default: 55)
+        """
+        self._on_prefetch_tick = callback
+        self._prefetch_second = prefetch_second
+        logger.info(f"Prefetch tick callback registered (second={prefetch_second})")
 
     def register_specific_time_callback(
         self, time_str: str, callback: Callable[[], None]
@@ -193,7 +211,15 @@ class TradingScheduler:
             except Exception as e:
                 logger.error(f"Check fills error: {e}")
 
-        # 2. 종목별 틱 처리
+        # 2. Prefetch 체크 (매분 n초)
+        if self._on_prefetch_tick and now.second == self._prefetch_second:
+            for stock_code in self._stocks:
+                try:
+                    self._on_prefetch_tick(stock_code, now)
+                except Exception as e:
+                    logger.error(f"Prefetch tick error [{stock_code}]: {e}")
+
+        # 3. 종목별 틱 처리
         if not self._on_stock_tick:
             return
 

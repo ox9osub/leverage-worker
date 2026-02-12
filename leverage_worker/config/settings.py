@@ -89,6 +89,7 @@ class Settings:
         self.notification = NotificationConfig()
         self._credentials: Dict[str, Any] = {}
         self._stocks: Dict[str, StockConfig] = {}
+        self._execution: Dict[str, Any] = {}
         self._config_path: Optional[Path] = None
 
         # 설정 자동 로드
@@ -167,6 +168,9 @@ class Settings:
             enable_trade_alerts=notification_cfg.get("enable_trade_alerts", True),
             enable_daily_report=notification_cfg.get("enable_daily_report", True),
         )
+
+        # 실행 설정
+        self._execution = config.get("execution", {})
 
         # 종목 설정
         stocks_cfg = config.get("stocks", {})
@@ -258,6 +262,18 @@ class Settings:
                 if strategy.get("name") == strategy_name:
                     return float(strategy.get("allocation", 100))
         return 100.0
+
+    def get_prefetch_second(self) -> int:
+        """예수금 사전 조회 시점 (초) 반환"""
+        return self._execution.get("prefetch_second", 55)
+
+    def get_prefetch_cache_ttl(self) -> int:
+        """예수금 캐시 유효 시간 (초) 반환"""
+        return self._execution.get("prefetch_cache_ttl", 10)
+
+    def get_buy_fee_rate(self) -> float:
+        """매수 수수료율 반환 (기본값: 0.015%)"""
+        return self._execution.get("buy_fee_rate", 0.00015)
 
     def get_server_url(self) -> str:
         """API 서버 URL 반환"""

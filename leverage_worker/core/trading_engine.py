@@ -154,6 +154,11 @@ class TradingEngine:
         # 18. 청산 진행 플래그 (전략 실행 skip용)
         self._liquidation_in_progress = False
 
+        # 19. Prefetch 캐시 (예수금 사전 조회)
+        self._prefetch_cache: Dict[str, tuple[int, datetime]] = {}  # stock_code -> (deposit, timestamp)
+        self._prefetch_cache_ttl: int = settings.get_prefetch_cache_ttl()
+        self._buy_fee_rate: float = settings.get_buy_fee_rate()
+
         # 세션 ID
         self._session_id = str(uuid.uuid4())[:8]
 
@@ -260,6 +265,14 @@ class TradingEngine:
             self._scheduler.set_on_market_open(self._on_market_open)
             self._scheduler.set_on_market_close(self._on_market_close)
             self._scheduler.set_on_idle(self._on_idle)
+            self._scheduler.set_on_prefetch_tick(
+                self._on_prefetch_tick,
+                self._settings.get_prefetch_second(),
+            )
+            logger.info(
+                f"Prefetch tick registered (second={self._settings.get_prefetch_second()}, "
+                f"ttl={self._prefetch_cache_ttl}s, fee_rate={self._buy_fee_rate:.4%})"
+            )
 
             # 7-1. 15:19 당일 청산 콜백 등록
             self._scheduler.register_specific_time_callback("15:19", self._on_daily_liquidation)
@@ -1211,6 +1224,38 @@ class TradingEngine:
 
     # ===== 스케줄러 기반 메서드 =====
 
+    def _on_prefetch_tick(self, stock_code: str, now: datetime) -> None:
+        """
+        예수금 사전 조회 콜백 (매분 n초에 실행)
+
+        신호 발생 전에 미리 예수금을 조회하여 캐싱합니다.
+        이를 통해 신호 발생 시 API 호출 없이 빠르게 수량을 계산할 수 있습니다.
+        """
+        try:
+            # 예수금 조회 (current_price=0으로 호출하면 API의 기본값 사용)
+            _, deposit = self._broker.get_buyable_quantity(stock_code, 0)
+
+            self._prefetch_cache[stock_code] = (deposit, now)
+
+            logger.debug(f"[prefetch][{stock_code}] 캐시 저장: 예수금 {deposit:,}원")
+        except Exception as e:
+            logger.error(f"[prefetch][{stock_code}] 조회 실패: {e}")
+
+    def _get_prefetch_cache(self, stock_code: str) -> Optional[int]:
+        """
+        유효한 예수금 캐시 반환 (TTL 체크)
+
+        Returns:
+            예수금 (deposit) 또는 None (캐시 없거나 만료)
+        """
+        cached = self._prefetch_cache.get(stock_code)
+        if cached:
+            deposit, timestamp = cached
+            elapsed = (datetime.now() - timestamp).total_seconds()
+            if elapsed < self._prefetch_cache_ttl:
+                return deposit
+        return None
+
     def _on_stock_tick(self, stock_code: str, now: datetime) -> None:
         """
         종목 틱 콜백 (스케줄러 기반 전략용)
@@ -1449,31 +1494,13 @@ class TradingEngine:
             win_rate = self._settings.get_strategy_win_rate(stock_code, strategy.name)
             allocation = self._settings.get_strategy_allocation(stock_code, strategy.name)
 
-            # 매수 수량 및 최대매수금액 조회: inquire-psbl-order API 사용
-            # 현재가를 전달하여 MTS와 동일한 방식으로 계산
-            buyable_qty, max_buy_amt = self._broker.get_buyable_quantity(stock_code, context.current_price)
-            if buyable_qty > 0:
-                # allocation 비율 적용
-                quantity = int(buyable_qty * (allocation / 100))
-                if quantity < 1:
-                    logger.warning(f"[{stock_code}] 계산된 수량 0 → 최소 1주로 설정")
-                    quantity = 1
-                logger.info(
-                    f"[{stock_code}] 매수 수량 계산: {quantity}주 "
-                    f"(매수가능: {buyable_qty}주, allocation: {allocation}%, 최대금액: {max_buy_amt:,}원)"
-                )
-            else:
-                quantity = signal.quantity
-                max_buy_amt = context.current_price * quantity  # fallback
-                logger.warning(f"[{stock_code}] 매수가능수량 조회 실패 → 시그널 수량 사용: {quantity}주")
-
-            # TP/SL 가격 계산
+            # TP/SL 가격 계산 (수량 계산보다 먼저 - signal_price 필요)
             params = strategy.params if hasattr(strategy, 'params') else {}
             tp_rate = params.get("take_profit_pct", 0.003)
             sl_rate = params.get("stop_loss_pct", 0.01)
             price_offset_pct = params.get("price_offset_pct", 0.0)
 
-            # 오프셋 적용된 시그널 가격 (TP/SL 기준가)
+            # 오프셋 적용된 시그널 가격 (TP/SL 기준가, 수량 계산에도 사용)
             signal_price = int(context.current_price * (1 + price_offset_pct))
             tp_price = int(signal_price * (1 + tp_rate))
             sl_price = int(signal_price * (1 - sl_rate))
@@ -1483,6 +1510,35 @@ class TradingEngine:
                     f"[{stock_code}] price_offset: {price_offset_pct:+.4f} "
                     f"현재가 {context.current_price:,} → 시그널가 {signal_price:,}"
                 )
+
+            # 캐시된 예수금 사용 또는 실시간 조회
+            cached_deposit = self._get_prefetch_cache(stock_code)
+            if cached_deposit:
+                max_buy_amt = cached_deposit
+                logger.info(f"[{stock_code}] prefetch 캐시 사용: 예수금 {max_buy_amt:,}원")
+            else:
+                _, max_buy_amt = self._broker.get_buyable_quantity(stock_code, 0)
+                logger.warning(f"[{stock_code}] prefetch 캐시 없음 → 실시간 조회: 예수금 {max_buy_amt:,}원")
+
+            # 수수료 적용하여 매수가능수량 계산
+            price_with_fee = int(signal_price * (1 + self._buy_fee_rate))
+            buyable_qty = max_buy_amt // price_with_fee if price_with_fee > 0 else 0
+
+            if buyable_qty > 0:
+                # allocation 비율 적용
+                quantity = int(buyable_qty * (allocation / 100))
+                if quantity < 1:
+                    logger.warning(f"[{stock_code}] 계산된 수량 0 → 최소 1주로 설정")
+                    quantity = 1
+                logger.info(
+                    f"[{stock_code}] 매수 수량 계산: {quantity}주 "
+                    f"(예수금: {max_buy_amt:,}원, 가격: {signal_price:,}원, "
+                    f"수수료율: {self._buy_fee_rate:.4%}, allocation: {allocation}%)"
+                )
+            else:
+                quantity = signal.quantity
+                max_buy_amt = context.current_price * quantity  # fallback
+                logger.warning(f"[{stock_code}] 매수가능수량 조회 실패 → 시그널 수량 사용: {quantity}주")
 
             # 시그널 알림 (주문 전) - 매수 시그널은 매번 전송
             self._slack.notify_signal(
