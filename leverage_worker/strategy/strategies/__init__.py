@@ -15,6 +15,7 @@ ML 기반 전략 (122630):
     - ml_momentum: ML 모멘텀 전략 (변동성 예측 + 모멘텀)
     - main_beam_1: ML 지정가 매수 전략 (90_1, 앙상블 모델, 1분 보유)
     - main_beam_2: ML 지정가 매수 전략 (90_2, 앙상블 모델, 2분 보유)
+    - main_beam_4: ML 지정가 매수 전략 (4분 보유, 2단계 필터링)
 
 KODEX 코스닥150레버리지 (233740) 전략:
     - kosdaq_bb_conservative: 볼린저 밴드 보수적 전략 (BB_Conservative)
@@ -26,60 +27,16 @@ KODEX 코스닥150레버리지 (233740) 전략:
     - simple_momentum: 단순 모멘텀 전략
 """
 
-# 기존 예시 전략
-from leverage_worker.strategy.strategies.example_strategy import (
-    ExampleStrategy,
-    SimpleMomentumStrategy,
-)
+import importlib
+import pkgutil
+from pathlib import Path
 
-# KODEX 레버리지 (122630) 전략
-from leverage_worker.strategy.strategies.hybrid_momentum import HybridMomentumStrategy
-from leverage_worker.strategy.strategies.breakout_high import BreakoutHigh5Strategy
-from leverage_worker.strategy.strategies.bollinger_band import BollingerBandStrategy
-from leverage_worker.strategy.strategies.fibonacci_lucky import FibonacciLuckyStrategy
-from leverage_worker.strategy.strategies.fee_optimized import FeeOptimizedStrategy
+# 디렉토리 내 모든 전략 모듈 자동 import
+# @register_strategy 데코레이터가 있는 전략은 자동으로 StrategyRegistry에 등록됨
+_package_dir = Path(__file__).parent
+for _, _module_name, _ in pkgutil.iter_modules([str(_package_dir)]):
+    if not _module_name.startswith('_'):
+        importlib.import_module(f'.{_module_name}', package=__name__)
 
-# ML 기반 전략 (122630)
-from leverage_worker.strategy.strategies.ml_price_position import MLPricePositionStrategy
-from leverage_worker.strategy.strategies.ml_momentum import MLMomentumStrategy
-from leverage_worker.strategy.strategies.main_beam_1 import MainBeam1Strategy
-from leverage_worker.strategy.strategies.main_beam_2 import MainBeam2Strategy
-
-# KODEX 코스닥150레버리지 (233740) 전략
-from leverage_worker.strategy.strategies.kosdaq_bb_conservative import (
-    KosdaqBBConservativeStrategy,
-)
-from leverage_worker.strategy.strategies.kosdaq_donchian import KosdaqDonchianStrategy
-from leverage_worker.strategy.strategies.kosdaq_mdd_target import KosdaqMDDTargetStrategy
-
-# WebSocket 실시간 전략
-from leverage_worker.strategy.strategies.dip_buy import DipBuyStrategy
-
-# 스캘핑 전략
-from leverage_worker.strategy.strategies.scalping_range import ScalpingRangeStrategy
-
-
-__all__ = [
-    # 기본 예시 전략
-    "ExampleStrategy",
-    "SimpleMomentumStrategy",
-    # KODEX 레버리지 (122630) 전략
-    "HybridMomentumStrategy",
-    "BreakoutHigh5Strategy",
-    "BollingerBandStrategy",
-    "FibonacciLuckyStrategy",
-    "FeeOptimizedStrategy",
-    # ML 기반 전략 (122630)
-    "MLPricePositionStrategy",
-    "MLMomentumStrategy",
-    "MainBeam1Strategy",
-    "MainBeam2Strategy",
-    # KODEX 코스닥150레버리지 (233740) 전략
-    "KosdaqBBConservativeStrategy",
-    "KosdaqDonchianStrategy",
-    "KosdaqMDDTargetStrategy",
-    # WebSocket 실시간 전략
-    "DipBuyStrategy",
-    # 스캘핑 전략
-    "ScalpingRangeStrategy",
-]
+# 명시적 export는 더 이상 필요하지 않음 (레지스트리 통해 접근)
+__all__: list[str] = []

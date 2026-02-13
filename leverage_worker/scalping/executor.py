@@ -1082,6 +1082,16 @@ class ScalpingExecutor:
 
         # SL 체크 (매 틱)
         if self._signal_ctx and price <= self._signal_ctx.sl_price:
+            # 체결봉 SL 제외: 시그널 후 60초 이내면 SL 스킵
+            if self._signal_ctx.metadata.get("sl_check_from_next_bar"):
+                elapsed_from_signal = (timestamp - self._signal_ctx.signal_time).total_seconds()
+                if elapsed_from_signal < 60:
+                    logger.debug(
+                        f"[scalping][{self._stock_name}] SL 제외: "
+                        f"시그널 후 {elapsed_from_signal:.0f}초 (60초 이내)"
+                    )
+                    return  # SL 스킵, TP는 위에서 이미 체크됨
+
             logger.warning(f"[scalping][{self._stock_name}] SL 도달 → 시장가 매도")
             if self._buy_order_id:
                 cancel_qty = self._buy_order_qty - self._held_qty
@@ -1138,6 +1148,16 @@ class ScalpingExecutor:
 
         # SL 체크 (지정가 주문만, 시장가는 스킵)
         if self._sell_order_price > 0 and self._signal_ctx and price <= self._signal_ctx.sl_price:
+            # 체결봉 SL 제외: 시그널 후 60초 이내면 SL 스킵
+            if self._signal_ctx.metadata.get("sl_check_from_next_bar"):
+                elapsed_from_signal = (timestamp - self._signal_ctx.signal_time).total_seconds()
+                if elapsed_from_signal < 60:
+                    logger.debug(
+                        f"[scalping][{self._stock_name}] SL 제외 (매도대기): "
+                        f"시그널 후 {elapsed_from_signal:.0f}초 (60초 이내)"
+                    )
+                    return  # SL 스킵
+
             logger.warning(f"[scalping] 매도 대기 중 SL 도달 → 시장가 전환")
 
             # 부분 매도 PnL 보존 후 주문 정리

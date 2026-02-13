@@ -948,14 +948,19 @@ class KISBroker:
             nrcvb_buy_qty = get_value("nrcvb_buy_qty")  # 미수없는매수수량
 
             # 주문가능현금을 현재가로 나누어 계산 (MTS 현금매수가능과 동일)
-            calc_price = current_price if current_price > 0 else psbl_qty_calc_unpr
-
-            if calc_price > 0:
-                calculated_qty = ord_psbl_cash // calc_price
+            # current_price=0인 경우 (prefetch용) 예수금만 반환
+            if current_price > 0:
+                calculated_qty = ord_psbl_cash // current_price
                 logger.info(
                     f"[{stock_code}] 매수수량 계산: "
-                    f"{ord_psbl_cash:,} / {calc_price:,} = {calculated_qty}주"
+                    f"{ord_psbl_cash:,} / {current_price:,} = {calculated_qty}주"
                 )
+                return calculated_qty, ord_psbl_cash
+
+            # current_price=0: prefetch용 - 예수금만 반환 (수량 계산 생략)
+            if psbl_qty_calc_unpr > 0:
+                calculated_qty = ord_psbl_cash // psbl_qty_calc_unpr
+                logger.debug(f"[{stock_code}] 예수금 조회: {ord_psbl_cash:,}원")
                 return calculated_qty, ord_psbl_cash
 
             # fallback: 기존 방식 (계산단가가 없는 경우)
