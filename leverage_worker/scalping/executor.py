@@ -234,6 +234,12 @@ class ScalpingExecutor:
             주문 성공 여부
         """
         with self._lock:
+            # BUY_PENDING 상태: 시그널 갱신 (기존 주문 취소 후 재주문)
+            if self._state == ScalpingState.BUY_PENDING:
+                return self._update_pending_buy_order(
+                    buy_price, sell_price, timeout_seconds, quantity
+                )
+
             if self._state != ScalpingState.IDLE:
                 logger.warning(
                     f"[scalping][{self._stock_code}] "
@@ -334,6 +340,128 @@ class ScalpingExecutor:
                     f"result={result}"
                 )
                 return False
+
+    def _update_pending_buy_order(
+        self,
+        buy_price: int,
+        sell_price: int,
+        timeout_seconds: int,
+        quantity: int = 0,
+    ) -> bool:
+        """
+        BUY_PENDING 상태에서 새 시그널로 주문 갱신
+
+        기존 매수 주문을 취소하고 새 가격으로 재주문.
+        취소 중 체결이 발생하면 매도로 진행.
+
+        Args:
+            buy_price: 새 지정가 매수 가격
+            sell_price: 새 지정가 매도 가격
+            timeout_seconds: 타임아웃 (초)
+            quantity: 매수 수량 (0이면 allocation 기반 자동 계산)
+
+        Returns:
+            True: 새 주문 접수 성공
+            False: 갱신 실패 (기존 상태 유지 또는 매도 진행)
+        """
+        # 이미 _lock 내에서 호출됨
+        old_order_id = self._buy_order_id
+        old_price = self._buy_order_price
+        old_qty = self._buy_order_qty
+
+        logger.info(
+            f"[scalping][{self._stock_name}] BUY_PENDING 시그널 갱신: "
+            f"{old_price:,} → {buy_price:,}원"
+        )
+
+        # Step 1: 기존 주문 취소
+        self._cancel_buy_order()
+
+        # Step 2: 취소 후 최종 체결 상태 확인 (Race condition 방지)
+        if old_order_id:
+            filled_qty, _ = self._broker.get_order_status(
+                old_order_id,
+                stock_code=self._stock_code,
+                order_qty=old_qty,
+                side=OrderSide.BUY,
+            )
+
+            if filled_qty > 0:
+                # 체결 발생 → 매도 진행, 새 주문 취소
+                logger.info(
+                    f"[scalping][{self._stock_name}] 취소 전 체결: {filled_qty}주 → 매도 진행"
+                )
+                self._update_position(filled_qty, old_price)
+                self._clear_buy_order()
+                self._place_sell_order()
+                return False
+
+        # Step 3: 미체결 확인 → 이전 주문 정보 클리어
+        self._clear_buy_order()
+
+        # Step 4: 수량 계산
+        if quantity <= 0:
+            buyable_qty, _ = self._broker.get_buyable_quantity(
+                self._stock_code, buy_price
+            )
+            if buyable_qty > 0:
+                quantity = max(1, int(buyable_qty * (self._allocation / 100)))
+                logger.info(
+                    f"[scalping][{self._stock_code}] 수량 재계산: "
+                    f"{buyable_qty}주 x {self._allocation}% = {quantity}주"
+                )
+            else:
+                logger.error(
+                    f"[scalping][{self._stock_name}] 매수가능수량 조회 실패"
+                )
+                self._reset_to_idle()
+                return False
+
+        # Step 5: 컨텍스트 갱신
+        timeout_minutes = max(1, timeout_seconds // 60)
+        self._signal_ctx = ScalpingSignalContext(
+            signal_price=buy_price,
+            signal_time=datetime.now(),
+            tp_pct=0.001,
+            sl_pct=0.01,
+            timeout_minutes=timeout_minutes,
+        )
+        self._signal_ctx.metadata["sell_price"] = sell_price
+        self._signal_ctx.metadata["timeout_seconds"] = timeout_seconds
+        self._signal_ctx.metadata["is_limit_order"] = True
+
+        # Step 6: 새 주문 접수
+        try:
+            result = self._broker.place_limit_order(
+                stock_code=self._stock_code,
+                side=OrderSide.BUY,
+                quantity=quantity,
+                price=buy_price,
+            )
+        except Exception as e:
+            logger.error(f"[scalping][{self._stock_name}] 재주문 실패: {e}")
+            self._reset_to_idle()
+            return False
+
+        if result and result.success:
+            self._buy_order_id = result.order_id
+            self._buy_order_branch = getattr(result, "branch_no", "01")
+            self._buy_order_price = buy_price
+            self._buy_order_qty = quantity
+            self._buy_order_time = datetime.now()  # 타이머 리셋
+
+            # DB 저장
+            self._save_order_to_db(result.order_id, "BUY", quantity, buy_price)
+
+            logger.info(
+                f"[scalping][{self._stock_name}] 시그널 갱신 완료: "
+                f"order_id={result.order_id}, {buy_price:,}원 x {quantity}주"
+            )
+            return True
+        else:
+            logger.error(f"[scalping][{self._stock_name}] 재주문 실패: {result}")
+            self._reset_to_idle()
+            return False
 
     def handle_short_signal(self, short_price: int, reason: str) -> None:
         """
