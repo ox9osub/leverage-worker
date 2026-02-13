@@ -38,7 +38,7 @@ class ScalpingConfig:
     position_size: int = 1  # 매수 수량
 
     # 시그널 수명 (반복 매매 기간)
-    stop_loss_pct: float = 0.01  # 시그널가 대비 1% 하락 시 종료
+    stop_loss_pct: float = 0.001  # 시그널가 대비 0.1% 하락 시 종료 (기본값 변경)
     take_profit_pct: float = 0.003  # 시그널가 대비 0.3% 상승 시 종료
     max_signal_minutes: int = 60  # 시그널 유효 시간 (분)
 
@@ -78,7 +78,7 @@ class ScalpingConfig:
             percentile_threshold=params.get("percentile_threshold", 10.0),
             sell_profit_pct=params.get("sell_profit_pct", 0.001),
             position_size=params.get("position_size", 1),
-            stop_loss_pct=params.get("stop_loss_pct", 0.01),
+            stop_loss_pct=params.get("stop_loss_pct", 0.001),
             take_profit_pct=params.get("take_profit_pct", 0.003),
             max_signal_minutes=params.get("max_signal_minutes", 60),
             buy_timeout_seconds=params.get("buy_timeout_seconds", 10),

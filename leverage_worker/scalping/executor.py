@@ -272,7 +272,7 @@ class ScalpingExecutor:
                 signal_price=buy_price,
                 signal_time=datetime.now(),
                 tp_pct=0.001,  # 참고용 (실제로는 sell_price 사용)
-                sl_pct=0.01,  # 1% 손절
+                sl_pct=self._config.stop_loss_pct,  # config에서 SL% 설정 (기본 0.1%)
                 timeout_minutes=timeout_minutes,
             )
             # 메타데이터에 매도가/타임아웃 저장
@@ -423,7 +423,7 @@ class ScalpingExecutor:
             signal_price=buy_price,
             signal_time=datetime.now(),
             tp_pct=0.001,
-            sl_pct=0.01,
+            sl_pct=self._config.stop_loss_pct,  # config에서 SL% 설정 (기본 0.1%)
             timeout_minutes=timeout_minutes,
         )
         self._signal_ctx.metadata["sell_price"] = sell_price
