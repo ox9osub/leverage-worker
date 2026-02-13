@@ -33,7 +33,12 @@
       "Bash(/c/Users/suble/.conda/envs/leverage-worker/python.exe:*)",
       "Bash(wc:*)",
       "Bash(del \"c:\\\\Users\\\\suble\\\\Desktop\\\\work\\\\project\\\\leverage-worker\\\\leverage_worker\\\\config\\\\credentials\\\\kis_paper.yaml\")",
-      "Bash(del \"c:\\\\Users\\\\suble\\\\Desktop\\\\work\\\\project\\\\leverage-worker\\\\leverage_worker\\\\config\\\\credentials\\\\kis_prod.yaml\")"
+      "Bash(del \"c:\\\\Users\\\\suble\\\\Desktop\\\\work\\\\project\\\\leverage-worker\\\\leverage_worker\\\\config\\\\credentials\\\\kis_prod.yaml\")",
+      "Bash(git -C \"c:\\\\Users\\\\suble\\\\Desktop\\\\work\\\\project\\\\leverage-worker\" diff b723cae a5dbe50 -- leverage_worker/trading/broker.py)",
+      "Bash(git -C \"c:\\\\Users\\\\suble\\\\Desktop\\\\work\\\\project\\\\leverage-worker\" diff HEAD -- leverage_worker/trading/broker.py)",
+      "Bash(git -C \"c:\\\\Users\\\\suble\\\\Desktop\\\\work\\\\project\\\\leverage-worker\" branch -v)",
+      "Bash(git -C \"c:\\\\Users\\\\suble\\\\Desktop\\\\work\\\\project\\\\leverage-worker\" blame leverage_worker/trading/broker.py -L 270,280)",
+      "Bash(git -C \"c:\\\\Users\\\\suble\\\\Desktop\\\\work\\\\project\\\\leverage-worker\" log --oneline -5 -- leverage_worker/config/trading_config.yaml)"
     ],
     "deny": [],
     "ask": []

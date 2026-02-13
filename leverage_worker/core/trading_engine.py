@@ -540,9 +540,13 @@ class TradingEngine:
 
                 # YYYYMMDD + HHMMSS -> YYYYMMDD_HHMM 형식으로 변환
                 minute_key = f"{trade_date}_{hour_min}"
-                self._price_repo.upsert_from_api_response(
+                # REST API의 정확한 OHLCV 저장 (close만 사용하면 O/H/L이 손실됨)
+                self._price_repo.upsert_price(
                     stock_code=stock_code,
-                    current_price=data["close_price"],
+                    open_price=data["open_price"],
+                    high_price=data["high_price"],
+                    low_price=data["low_price"],
+                    close_price=data["close_price"],
                     volume=data["volume"],
                     minute_key=minute_key,
                 )
