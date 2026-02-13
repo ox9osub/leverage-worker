@@ -40,6 +40,7 @@ ML 기반 4분 지정가 스캘핑 전략
 
 import csv
 import logging
+import math
 from datetime import datetime, time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -83,6 +84,9 @@ class MainBeam4Strategy(BaseStrategy):
         self._sell_profit_pct = self.get_param("sell_profit_pct", 0.001)    # +0.1%
         self._timeout_seconds = self.get_param("timeout_seconds", 240)      # 4분
         self._sl_check_from_next_bar = self.get_param("sl_check_from_next_bar", True)
+
+        # Momentum 필터 (ML 예측 전 필터링)
+        self._momentum_5_pct_min = self.get_param("momentum_5_pct_min", -0.003)  # -0.3%
 
         # 거래 시간 설정
         self._trading_start = self.get_param("trading_start", "09:00")
@@ -216,7 +220,19 @@ class MainBeam4Strategy(BaseStrategy):
             )
             return TradingSignal.hold(stock_code, f"피처 누락: {len(missing_cols)}개")
 
-        # 마지막 행의 피처 추출
+        # 마지막 행 참조 (Momentum 필터 + OHLCV 로그용)
+        last_row = df.iloc[-1]
+
+        # Momentum 필터 (ML 예측 전 - 비용 절감)
+        momentum_5_pct = last_row.get("momentum_pct_5", 0.0)
+        if math.isnan(momentum_5_pct):
+            momentum_5_pct = 0.0
+        if momentum_5_pct < self._momentum_5_pct_min:
+            reason = f"momentum_5_pct 미달: {momentum_5_pct:.2%} < {self._momentum_5_pct_min:.1%}"
+            logger.info(f"[{stock_code}] {reason}")
+            return TradingSignal.hold(stock_code, reason)
+
+        # 피처 추출 (필터 통과 시에만)
         try:
             features = df[self._feature_cols].iloc[-1:].values
         except Exception as e:
@@ -231,7 +247,6 @@ class MainBeam4Strategy(BaseStrategy):
             return TradingSignal.hold(stock_code, f"예측 실패: {e}")
 
         # OHLCV + 확률 로그 출력
-        last_row = df.iloc[-1]
         logger.info(
             f"[{self.name}] prob({old_proba:.1%}/{new_proba:.1%}) "
             f"O({int(last_row['open']):,}) H({int(last_row['high']):,}) "
