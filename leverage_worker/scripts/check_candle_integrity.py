@@ -251,7 +251,7 @@ def main():
                     diff = cnt - EXPECTED_MINUTE_CANDLES_PER_DAY
                     sign = "+" if diff > 0 else ""
                     print(f"        - {formatted}: {cnt}개 ({sign}{diff})")
-                if len(incomplete_minute) > 10:
+                if len(incomplete_minute) > 100:
                     print(f"        ... 외 {len(incomplete_minute) - 10}일")
             else:
                 # 분봉 있는 날 수 확인

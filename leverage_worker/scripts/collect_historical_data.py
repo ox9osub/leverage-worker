@@ -16,8 +16,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent / "kis-trader"))
 
 import time
+import random
 from datetime import datetime, timedelta
-from typing import List
+from typing import List, Callable, TypeVar, Any
 
 from src.api.kis_api import KISApi
 
@@ -29,6 +30,61 @@ from leverage_worker.data.minute_candle_repository import MinuteCandle, MinuteCa
 SYMBOLS = ["122630", "233740"]
 YEAR_DAYS = 365  # 실제 거래일은 약 250일, 휴일 포함해서 넉넉히
 EXPECTED_MINUTE_BARS = 381  # 09:00 ~ 15:30 = 390분, 실제 약 381개
+
+# Rate limit 관련 설정
+API_DELAY = 0.5  # 기본 API 호출 간 대기 시간 (초)
+MAX_RETRIES = 5  # 최대 재시도 횟수
+INITIAL_BACKOFF = 1.0  # 초기 backoff 시간 (초)
+MAX_BACKOFF = 60.0  # 최대 backoff 시간 (초)
+
+T = TypeVar("T")
+
+
+def retry_with_backoff(
+    func: Callable[..., T],
+    *args: Any,
+    max_retries: int = MAX_RETRIES,
+    initial_backoff: float = INITIAL_BACKOFF,
+    max_backoff: float = MAX_BACKOFF,
+    **kwargs: Any,
+) -> T:
+    """
+    Exponential backoff으로 함수 재시도
+
+    Rate limit 에러 발생 시 점진적으로 대기 시간을 늘려가며 재시도합니다.
+    """
+    last_exception: Exception | None = None
+    backoff = initial_backoff
+
+    for attempt in range(max_retries + 1):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:
+            last_exception = e
+            error_msg = str(e).lower()
+
+            # Rate limit 관련 에러인지 확인
+            is_rate_limit = any(
+                keyword in error_msg
+                for keyword in ["rate", "limit", "too many", "429", "exceeded"]
+            )
+
+            if attempt == max_retries:
+                break
+
+            # Rate limit이면 더 길게 대기
+            if is_rate_limit:
+                wait_time = min(backoff * (2**attempt), max_backoff)
+                # Jitter 추가 (0.5 ~ 1.5 배)
+                wait_time *= 0.5 + random.random()
+                print(f"    Rate limit 감지, {wait_time:.1f}초 대기 후 재시도 ({attempt + 1}/{max_retries})...")
+            else:
+                wait_time = backoff
+                print(f"    에러 발생, {wait_time:.1f}초 대기 후 재시도 ({attempt + 1}/{max_retries}): {e}")
+
+            time.sleep(wait_time)
+
+    raise last_exception  # type: ignore
 
 
 def get_trading_dates(days: int = 365) -> List[str]:
@@ -71,7 +127,9 @@ def collect_minute_data(
 
     for tp in time_points:
         try:
-            ohlcv_list = api.get_historical_minute_data(symbol, date_str, tp)
+            ohlcv_list = retry_with_backoff(
+                api.get_historical_minute_data, symbol, date_str, tp
+            )
             for ohlcv in ohlcv_list:
                 candle = MinuteCandle(
                     stock_code=symbol,
@@ -84,10 +142,9 @@ def collect_minute_data(
                     volume=ohlcv.volume,
                 )
                 all_candles.append(candle)
-            time.sleep(0.3)  # Rate limit
+            time.sleep(API_DELAY)
         except Exception as e:
-            print(f"  [{tp}] Error: {e}")
-            time.sleep(1)
+            print(f"  [{tp}] Error (재시도 실패): {e}")
 
     # 중복 제거 (candle_datetime 기준)
     seen = set()
@@ -123,9 +180,11 @@ def collect_daily_data(
 ) -> int:
     """일봉 데이터 수집 (최대 100건씩)"""
     try:
-        ohlcv_list = api.get_daily_data(symbol, start_date, end_date)
+        ohlcv_list = retry_with_backoff(
+            api.get_daily_data, symbol, start_date, end_date
+        )
     except Exception as e:
-        print(f"  일봉 조회 실패 ({start_date}~{end_date}): {e}")
+        print(f"  일봉 조회 실패 ({start_date}~{end_date}, 재시도 실패): {e}")
         return 0
 
     candles = []
@@ -206,7 +265,7 @@ def main():
             count = collect_daily_data(api, daily_repo, symbol, start_date, end_date)
             daily_total += count
             print(f"  {start_date} ~ {end_date}: {count}건")
-            time.sleep(0.3)
+            time.sleep(API_DELAY)
         print(f"  => 일봉 총 {daily_total}건 저장")
 
         # 2. 분봉 수집
