@@ -85,8 +85,11 @@ class MainBeam4Strategy(BaseStrategy):
         self._timeout_seconds = self.get_param("timeout_seconds", 240)      # 4분
         self._sl_check_from_next_bar = self.get_param("sl_check_from_next_bar", True)
 
-        # Momentum 필터 (ML 예측 전 필터링)
-        self._momentum_5_pct_min = self.get_param("momentum_5_pct_min", -0.003)  # -0.3%
+        # Momentum 필터 (비활성화)
+        # self._momentum_5_pct_min = self.get_param("momentum_5_pct_min", -0.003)  # -0.3%
+
+        # Daily Position 필터 (ML 예측 전 필터링)
+        self._daily_position_min = self.get_param("daily_position_min", 0.10)  # 10%
 
         # 거래 시간 설정
         self._trading_start = self.get_param("trading_start", "09:00")
@@ -223,12 +226,21 @@ class MainBeam4Strategy(BaseStrategy):
         # 마지막 행 참조 (Momentum 필터 + OHLCV 로그용)
         last_row = df.iloc[-1]
 
-        # Momentum 필터 (ML 예측 전 - 비용 절감)
-        momentum_5_pct = last_row.get("momentum_pct_5", 0.0)
-        if math.isnan(momentum_5_pct):
-            momentum_5_pct = 0.0
-        if momentum_5_pct < self._momentum_5_pct_min:
-            reason = f"momentum_5_pct 미달: {momentum_5_pct:.2%} < {self._momentum_5_pct_min:.1%}"
+        # Momentum 필터 (비활성화)
+        # momentum_5_pct = last_row.get("momentum_pct_5", 0.0)
+        # if math.isnan(momentum_5_pct):
+        #     momentum_5_pct = 0.0
+        # if momentum_5_pct < self._momentum_5_pct_min:
+        #     reason = f"momentum_5_pct 미달: {momentum_5_pct:.2%} < {self._momentum_5_pct_min:.1%}"
+        #     logger.info(f"[{stock_code}] {reason}")
+        #     return TradingSignal.hold(stock_code, reason)
+
+        # Daily Position 필터 (ML 예측 전 - 비용 절감)
+        daily_position = last_row.get("daily_position", 0.0)
+        if math.isnan(daily_position):
+            daily_position = 0.0
+        if daily_position < self._daily_position_min:
+            reason = f"daily_position 미달: {daily_position:.2%} < {self._daily_position_min:.0%}"
             logger.info(f"[{stock_code}] {reason}")
             return TradingSignal.hold(stock_code, reason)
 
