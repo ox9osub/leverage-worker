@@ -225,12 +225,16 @@ class TradingEngine:
 
             # 3-1. 계좌 잔고 조회 및 출력 (API 연결 확인)
             logger.info("Fetching account balance...")
-            self._print_account_balance()
+            initial_positions, initial_summary = self._print_account_balance()
 
             # 4. 포지션 매니저 초기화 (매매 DB 사용)
             self._position_manager = PositionManager(self._broker, self._trading_db)
             self._position_manager.load_from_db()
-            self._position_manager.sync_with_broker()
+            # 시작 시 잔고 조회 결과 재사용 (API 중복 호출 방지)
+            if initial_summary:
+                self._position_manager.sync_with_data(initial_positions)
+            else:
+                self._position_manager.sync_with_broker()
 
             # 5. 주문 매니저 초기화 (매매 DB 사용)
             self._order_manager = OrderManager(
@@ -614,8 +618,13 @@ class TradingEngine:
                 f"다음 전략이 로드되지 않았습니다:\n{failed_list}"
             )
 
-    def _print_account_balance(self) -> None:
-        """계좌 잔고 조회 및 출력 (API 연결 확인용)"""
+    def _print_account_balance(self) -> tuple:
+        """
+        계좌 잔고 조회 및 출력 (API 연결 확인용)
+
+        Returns:
+            (positions, summary) 튜플 - sync_with_data에서 재사용
+        """
         try:
             positions, summary = self._broker.get_balance()
 
@@ -676,6 +685,8 @@ class TradingEngine:
 
             logger.info("=" * 50)
             logger.info("✅ API connection verified")
+
+            return positions, summary
 
         except RuntimeError:
             raise

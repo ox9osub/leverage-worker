@@ -217,6 +217,120 @@ class PositionManager:
         finally:
             self._sync_in_progress = False
 
+    def sync_with_data(self, broker_positions: List[Position]) -> None:
+        """
+        외부에서 전달받은 잔고 데이터로 동기화 (API 호출 없음)
+
+        시작 시 get_balance() 중복 호출을 방지하기 위해 사용.
+        이미 조회된 잔고 데이터를 재사용하여 동기화 수행.
+
+        Args:
+            broker_positions: 브로커에서 조회한 포지션 리스트
+        """
+        # 중복 동기화 방지
+        if self._sync_in_progress:
+            logger.debug("Sync already in progress, skipping")
+            return
+
+        self._sync_in_progress = True
+
+        try:
+            broker_codes = {p.stock_code for p in broker_positions}
+
+            # 락 내에서 포지션 업데이트
+            with self._lock:
+                discrepancies = []
+
+                # 1. 브로커에 있는 포지션 업데이트/추가
+                for bp in broker_positions:
+                    if bp.stock_code in self._positions:
+                        # 기존 포지션 업데이트
+                        mp = self._positions[bp.stock_code]
+
+                        # 불일치 감지 (수량이 다른 경우)
+                        if mp.quantity != bp.quantity:
+                            discrepancies.append({
+                                "stock_code": bp.stock_code,
+                                "type": "quantity_mismatch",
+                                "local": mp.quantity,
+                                "broker": bp.quantity,
+                            })
+
+                        mp.quantity = bp.quantity
+                        mp.avg_price = bp.avg_price
+                        mp.current_price = bp.current_price
+                        mp.updated_at = datetime.now()
+                    else:
+                        # 신규 포지션 (전략 없이 관리)
+                        mp = ManagedPosition(
+                            stock_code=bp.stock_code,
+                            stock_name=bp.stock_name,
+                            quantity=bp.quantity,
+                            avg_price=bp.avg_price,
+                            current_price=bp.current_price,
+                            strategy_name=None,
+                            entry_order_id=None,
+                            entry_time=datetime.now(),
+                        )
+                        self._positions[bp.stock_code] = mp
+                        logger.info(
+                            f"New position detected (unmanaged): {bp.stock_code} "
+                            f"x {bp.quantity} @ {bp.avg_price}"
+                        )
+
+                        # 감사 로그 기록
+                        self._audit.log_position(
+                            event_type="POSITION_SYNC",
+                            module="PositionManager",
+                            stock_code=bp.stock_code,
+                            stock_name=bp.stock_name,
+                            quantity=bp.quantity,
+                            avg_price=bp.avg_price,
+                            current_price=bp.current_price,
+                            profit_loss=mp.profit_loss,
+                            profit_rate=mp.profit_rate,
+                            strategy_name=None,
+                        )
+
+                # 2. 브로커에 없는 포지션 제거
+                for stock_code in list(self._positions.keys()):
+                    if stock_code not in broker_codes:
+                        mp = self._positions.pop(stock_code)
+
+                        # 감사 로그 기록
+                        self._audit.log_position(
+                            event_type="POSITION_SYNC",
+                            module="PositionManager",
+                            stock_code=mp.stock_code,
+                            stock_name=mp.stock_name,
+                            quantity=0,
+                            avg_price=mp.avg_price,
+                            current_price=mp.current_price,
+                            profit_loss=mp.profit_loss,
+                            profit_rate=mp.profit_rate,
+                            strategy_name=mp.strategy_name,
+                        )
+
+                        # 전략 매핑에서도 제거
+                        if mp.strategy_name and mp.strategy_name in self._strategy_stocks:
+                            self._strategy_stocks[mp.strategy_name].discard(stock_code)
+                        logger.info(f"Position removed: {stock_code}")
+
+                # 3. DB 저장
+                self._save_to_db()
+
+                # 4. 마지막 동기화 시간 업데이트
+                self._last_sync_time = datetime.now()
+
+                # 불일치 로깅
+                if discrepancies:
+                    logger.warning(f"Position discrepancies detected: {discrepancies}")
+
+            logger.debug(f"Synced {len(self._positions)} positions with data (no API call)")
+
+        finally:
+            self._sync_in_progress = False
+
     def get_position(self, stock_code: str) -> Optional[ManagedPosition]:
         """특정 종목 포지션 조회 (스레드 안전)"""
         with self._lock:
