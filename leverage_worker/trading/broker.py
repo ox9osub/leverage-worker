@@ -9,6 +9,7 @@ KIS API 브로커 모듈
 - 체결 조회
 """
 
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
@@ -96,13 +97,21 @@ class OrderInfo:
     order_time: str
 
 
-# KIS API 인증/계좌 관련 에러 코드 (토큰 재발급으로 복구 가능)
+# KIS API 인증 관련 에러 코드 (토큰 재발급으로 복구 가능)
 _AUTH_ERROR_CODES = frozenset({
-    "OPSQ2000",   # INPUT INVALID_CHECK_ACNO (계좌 검증 실패)
     "OPSQ0013",   # 유효하지 않은 토큰
     "EGW00123",   # 기간이 만료된 token
     "EGW00121",   # 유효하지 않은 token
 })
+
+# 일시적 에러 코드 (단순 재시도로 복구 가능, WebSocket fallback 패턴)
+_TRANSIENT_ERROR_CODES = frozenset({
+    "OPSQ2000",   # INPUT INVALID_CHECK_ACNO (일시적 계좌 검증 실패)
+})
+
+# 일시적 에러 재시도 설정
+_TRANSIENT_RETRY_DELAY = 1.0  # 재시도 간격 (초)
+_TRANSIENT_MAX_RETRIES = 3    # 최대 재시도 횟수
 
 
 class KISBroker:
@@ -123,8 +132,13 @@ class KISBroker:
 
     @staticmethod
     def _is_auth_error(res: APIResp) -> bool:
-        """인증/계좌 관련 에러 여부 확인"""
+        """인증 관련 에러 여부 확인 (토큰 재발급 필요)"""
         return res.get_error_code() in _AUTH_ERROR_CODES
+
+    @staticmethod
+    def _is_transient_error(res: APIResp) -> bool:
+        """일시적 에러 여부 확인 (단순 재시도로 복구 가능)"""
+        return res.get_error_code() in _TRANSIENT_ERROR_CODES
 
     def get_current_price(self, stock_code: str) -> Optional[StockPrice]:
         """
@@ -294,9 +308,9 @@ class KISBroker:
                 f"Error: {res.get_error_code()} {res.get_error_message()}"
             )
 
-            # 인증/계좌 에러 시 토큰 재발급 후 1회 재시도
+            # 인증 에러 시 토큰 재발급 후 1회 재시도
             if self._is_auth_error(res):
-                logger.warning("Auth/account error detected. Attempting token refresh and retry...")
+                logger.warning("Auth error detected. Attempting token refresh and retry...")
                 if self._session.force_reauthenticate():
                     res = self._session.url_fetch(api_url, tr_id, params=params)
                     self._session.smart_sleep()
@@ -309,6 +323,24 @@ class KISBroker:
                     logger.info("get_balance succeeded after token refresh")
                 else:
                     logger.error("Token re-authentication failed")
+                    return positions, summary
+            # 일시적 에러 시 WebSocket fallback 패턴으로 재시도
+            elif self._is_transient_error(res):
+                for retry in range(_TRANSIENT_MAX_RETRIES):
+                    logger.warning(
+                        f"Transient error {res.get_error_code()}. "
+                        f"Retry {retry + 1}/{_TRANSIENT_MAX_RETRIES} after {_TRANSIENT_RETRY_DELAY}s"
+                    )
+                    time.sleep(_TRANSIENT_RETRY_DELAY)
+                    res = self._session.url_fetch(api_url, tr_id, params=params)
+                    self._session.smart_sleep()
+                    if res.is_ok():
+                        logger.info(f"get_balance: Transient error resolved after {retry + 1} retries")
+                        break
+                else:
+                    logger.error(
+                        f"get_balance: Transient error persisted after {_TRANSIENT_MAX_RETRIES} retries"
+                    )
                     return positions, summary
             else:
                 return positions, summary
@@ -810,9 +842,49 @@ class KISBroker:
         orders = []
 
         if not res.is_ok():
-            logger.error(f"_get_orders failed - CANO: '{self._account_no}', ACNT_PRDT_CD: '{self._account_prod}'")
-            res.print_error(api_url)
-            return orders
+            logger.error(
+                f"_get_orders failed - CANO: '{self._account_no}', "
+                f"ACNT_PRDT_CD: '{self._account_prod}', "
+                f"Error: {res.get_error_code()} {res.get_error_message()}"
+            )
+
+            # 인증 에러 시 토큰 재발급 후 1회 재시도
+            if self._is_auth_error(res):
+                logger.warning("_get_orders: Auth error detected. Attempting token refresh and retry...")
+                if self._session.force_reauthenticate():
+                    res = self._session.url_fetch(api_url, tr_id, params=params)
+                    self._session.smart_sleep()
+                    if not res.is_ok():
+                        logger.error(
+                            f"_get_orders still failed after token refresh: "
+                            f"{res.get_error_code()} {res.get_error_message()}"
+                        )
+                        return orders
+                    logger.info("_get_orders succeeded after token refresh")
+                else:
+                    logger.error("Token re-authentication failed")
+                    return orders
+            # 일시적 에러 시 WebSocket fallback 패턴으로 재시도
+            elif self._is_transient_error(res):
+                for retry in range(_TRANSIENT_MAX_RETRIES):
+                    logger.warning(
+                        f"_get_orders: Transient error {res.get_error_code()}. "
+                        f"Retry {retry + 1}/{_TRANSIENT_MAX_RETRIES} after {_TRANSIENT_RETRY_DELAY}s"
+                    )
+                    time.sleep(_TRANSIENT_RETRY_DELAY)
+                    res = self._session.url_fetch(api_url, tr_id, params=params)
+                    self._session.smart_sleep()
+                    if res.is_ok():
+                        logger.info(f"_get_orders: Transient error resolved after {retry + 1} retries")
+                        break
+                else:
+                    logger.error(
+                        f"_get_orders: Transient error persisted after {_TRANSIENT_MAX_RETRIES} retries"
+                    )
+                    return orders
+            else:
+                res.print_error(api_url)
+                return orders
 
         try:
             body = res.get_body()
@@ -916,10 +988,10 @@ class KISBroker:
         self._session.smart_sleep()
 
         if not res.is_ok():
-            # 인증/계좌 에러 시 토큰 재발급 후 1회 재시도
+            # 인증 에러 시 토큰 재발급 후 1회 재시도
             if self._is_auth_error(res):
                 logger.warning(
-                    "get_buyable_quantity auth error detected. "
+                    "get_buyable_quantity: Auth error detected. "
                     "Attempting token refresh and retry..."
                 )
                 if self._session.force_reauthenticate():
@@ -934,6 +1006,27 @@ class KISBroker:
                     logger.info("get_buyable_quantity succeeded after token refresh")
                 else:
                     logger.error("Token re-authentication failed")
+                    return 0, 0
+            # 일시적 에러 시 WebSocket fallback 패턴으로 재시도
+            elif self._is_transient_error(res):
+                for retry in range(_TRANSIENT_MAX_RETRIES):
+                    logger.warning(
+                        f"get_buyable_quantity: Transient error {res.get_error_code()}. "
+                        f"Retry {retry + 1}/{_TRANSIENT_MAX_RETRIES} after {_TRANSIENT_RETRY_DELAY}s"
+                    )
+                    time.sleep(_TRANSIENT_RETRY_DELAY)
+                    res = self._session.url_fetch(api_url, tr_id, params=params)
+                    self._session.smart_sleep()
+                    if res.is_ok():
+                        logger.info(
+                            f"get_buyable_quantity: Transient error resolved after {retry + 1} retries"
+                        )
+                        break
+                else:
+                    logger.error(
+                        f"get_buyable_quantity: Transient error persisted after "
+                        f"{_TRANSIENT_MAX_RETRIES} retries"
+                    )
                     return 0, 0
             else:
                 res.print_error(api_url)
