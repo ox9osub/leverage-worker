@@ -117,19 +117,19 @@ class Settings:
 
         if self.mode == TradingMode.PAPER:
             self._credentials = {
-                "app_key": cfg.get("paper_app", ""),
-                "app_secret": cfg.get("paper_sec", ""),
-                "account_number": cfg.get("my_paper_stock", ""),
-                "account_product_code": cfg.get("my_prod", "01"),
-                "hts_id": cfg.get("my_htsid", ""),
+                "app_key": str(cfg.get("paper_app", "")),
+                "app_secret": str(cfg.get("paper_sec", "")),
+                "account_number": str(cfg.get("my_paper_stock", "")),
+                "account_product_code": str(cfg.get("my_prod", "01")),
+                "hts_id": str(cfg.get("my_htsid", "")),
             }
         else:
             self._credentials = {
-                "app_key": cfg.get("my_app", ""),
-                "app_secret": cfg.get("my_sec", ""),
-                "account_number": cfg.get("my_acct_stock", ""),
-                "account_product_code": cfg.get("my_prod", "01"),
-                "hts_id": cfg.get("my_htsid", ""),
+                "app_key": str(cfg.get("my_app", "")),
+                "app_secret": str(cfg.get("my_sec", "")),
+                "account_number": str(cfg.get("my_acct_stock", "")),
+                "account_product_code": str(cfg.get("my_prod", "01")),
+                "hts_id": str(cfg.get("my_htsid", "")),
             }
 
     def _load_trading_config(self, config_path: Path) -> None:
