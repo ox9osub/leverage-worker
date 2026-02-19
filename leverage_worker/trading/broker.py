@@ -906,6 +906,12 @@ class KISBroker:
             "OVRS_ICLD_YN": "N",
         }
 
+        logger.debug(
+            f"[get_buyable_quantity] API 호출 - "
+            f"TR_ID: {tr_id}, CANO: {self._account_no}, "
+            f"ACNT_PRDT_CD: {self._account_prod}, PDNO: {stock_code}"
+        )
+
         res = self._session.url_fetch(api_url, tr_id, params=params)
         self._session.smart_sleep()
 

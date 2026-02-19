@@ -464,6 +464,7 @@ class SessionManager:
         actual_tr_id = tr_id
         if tr_id[0] in ("T", "J", "C") and self._is_paper:
             actual_tr_id = "V" + tr_id[1:]
+            logger.debug(f"TR_ID 변환: {tr_id} → {actual_tr_id}")
 
         headers["tr_id"] = actual_tr_id
         headers["custtype"] = "P"
